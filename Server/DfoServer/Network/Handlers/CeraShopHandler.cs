@@ -322,9 +322,17 @@ namespace DfoServer.Network.Handlers
 
         private static byte ResolvePurchaseErrorCode(CeraShopPurchaseFailure failure)
         {
-            return failure == CeraShopPurchaseFailure.InsufficientCera
-                ? CeraShopPurchaseAckBuilder.ErrorCodeInsufficientCera
-                : CeraShopPurchaseAckBuilder.ErrorCodeInventoryFull;
+            switch (failure)
+            {
+                case CeraShopPurchaseFailure.InsufficientCera:
+                    return CeraShopPurchaseAckBuilder.ErrorCodeInsufficientCera;
+                case CeraShopPurchaseFailure.NoEffect:
+                    // 非"空间不足", 而是"该扩容档次已达成/当前无法购买"。
+                    // 113 实测文案为"限制购买的物品"(客户端提示表见 CeraShopPurchaseAckBuilder 注释)。
+                    return CeraShopPurchaseAckBuilder.ErrorCodeCannotBuy;
+                default:
+                    return CeraShopPurchaseAckBuilder.ErrorCodeInventoryFull;
+            }
         }
 
         private async Task SendQueuedItemListUpdates(
