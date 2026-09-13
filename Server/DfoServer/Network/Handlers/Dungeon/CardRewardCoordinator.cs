@@ -30,17 +30,20 @@ namespace DfoServer.Network.Handlers.Dungeon
         private readonly ICardRewardNotificationSender _sender;
         private readonly ISessionDirectory _sessions;
         private readonly IGameDatabase _database;
+        private readonly AntonAwakeningRewardCoordinator _antonRewards;
 
         internal CardRewardCoordinator(
             CardRewardService application = null,
             ICardRewardNotificationSender sender = null,
             ISessionDirectory sessions = null,
-            IGameDatabase database = null)
+            IGameDatabase database = null,
+            AntonAwakeningRewardCoordinator antonRewards = null)
         {
             _application = application ?? new CardRewardService();
             _sender = sender ?? new CardRewardNotificationSender();
             _sessions = sessions;
             _database = database;
+            _antonRewards = antonRewards;
         }
 
         internal void ScheduleAutoFlow(
@@ -417,6 +420,27 @@ namespace DfoServer.Network.Handlers.Dungeon
                         $"[CardRewardCoordinator] item update projection failed " +
                         $"after commit: cid={session.Player.CharacterId} " +
                         $"side={side} error={ex.Message}");
+                    return;
+                }
+
+                if (side == CardRewardSide.Free
+                    && _antonRewards != null
+                    && session.Player.IsCurrentDungeonRun(identity))
+                {
+                    try
+                    {
+                        await _antonRewards.OnFreeCardCommittedAsync(
+                            session,
+                            run);
+                    }
+                    catch (Exception ex)
+                    {
+                        FileLogger.Log(
+                            $"[CardRewardCoordinator] Anton projection failed " +
+                            $"after free-card item update: " +
+                            $"cid={session.Player.CharacterId} " +
+                            $"error={ex.Message}");
+                    }
                 }
             }
             else if (!result.Committed

@@ -152,6 +152,41 @@ namespace DfoServer.SelfTests
                             == sharedSequence.DungeonIds.Count,
                         ref failures);
                 }
+
+                var anchoredNow = new DateTime(
+                    2026, 9, 12, 2, 0, 0, DateTimeKind.Utc);
+                var dailyReset = new Game.DailyReset.DailyResetService(
+                    database);
+                var awakeningProgress =
+                    new AntonAwakeningDailyProgressService(
+                        new AntonAwakeningDailyProgressRepository(
+                            database,
+                            dailyReset),
+                        () => anchoredNow);
+                AntonNormalClearApplicationResult awakeningResult = null;
+                foreach (var dungeonId in new[] { 243, 244, 245, 246 })
+                {
+                    if (!awakeningProgress.TryApplyClear(
+                            characterId,
+                            dungeonId,
+                            out awakeningResult))
+                    {
+                        break;
+                    }
+                }
+                var awakeningBody = awakeningResult == null
+                    ? Array.Empty<byte>()
+                    : DungeonNotificationBuilder.BuildSequentialDungeonInfo(
+                        awakeningResult.State.Sequence.ConfigKey,
+                        awakeningResult.State.ProgressIndex,
+                        awakeningResult.State.RouteMask);
+                Check(
+                    "key 41 reply carries progress four and route mask 0x0F",
+                    awakeningBody.Length == 9
+                    && BitConverter.ToInt32(awakeningBody, 0) == 41
+                    && awakeningBody[4] == 4
+                    && BitConverter.ToInt32(awakeningBody, 5) == 0x0F,
+                    ref failures);
             }
             finally
             {

@@ -1,5 +1,6 @@
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Dungeon;
+using System;
 using System.Threading.Tasks;
 
 namespace DfoServer.Network.Handlers.Dungeon
@@ -10,12 +11,18 @@ namespace DfoServer.Network.Handlers.Dungeon
     internal sealed class DungeonPersistentMechanismCoordinator
     {
         private readonly AntonNormalConquestNotifier _antonNormal;
+        private readonly AntonAwakeningDailyProgressService _awakeningProgress;
 
         internal DungeonPersistentMechanismCoordinator(
-            SqliteCharacterStateRepository characterStateRepository)
+            SqliteCharacterStateRepository characterStateRepository,
+            AntonAwakeningDailyLootGuard antonLootGuard = null,
+            AntonAwakeningDailyProgressService awakeningProgress = null)
         {
             _antonNormal = new AntonNormalConquestNotifier(
-                characterStateRepository);
+                characterStateRepository,
+                antonLootGuard,
+                awakeningProgress);
+            _awakeningProgress = awakeningProgress;
         }
 
         internal Task RestoreBeforeSelectionAsync(
@@ -27,6 +34,34 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal byte ResolveSequentialProgress(int characterId, int configKey)
             => _antonNormal.ResolveSequentialProgress(characterId, configKey);
+
+        internal bool TryResolveSequentialState(
+            int characterId,
+            int configKey,
+            out AntonNormalSyncState state)
+            => _antonNormal.TryResolveSequentialState(
+                characterId,
+                configKey,
+                out state);
+
+        internal AntonAwakeningAdmissionDecision EvaluateEntryAdmission(
+            int characterId,
+            int dungeonId)
+        {
+            if (_awakeningProgress != null)
+            {
+                return _awakeningProgress.EvaluateAdmission(
+                    characterId,
+                    dungeonId);
+            }
+            if (dungeonId != AntonAwakeningDailyProgressService.FinalDungeonId)
+            {
+                return new AntonAwakeningAdmissionDecision(
+                    AntonAwakeningAdmissionStatus.NotApplicable);
+            }
+            throw new InvalidOperationException(
+                "Anton Awakening daily progress service is unavailable.");
+        }
 
         internal Task ApplyDungeonClearAsync(
             EnhancedClientSession session,

@@ -1030,6 +1030,7 @@ namespace DfoServer.Game.Dungeon
         Unavailable = 2,
         MissingPermission = 3,
         MissingRequiredItem = 4,
+        MissingPrerequisite = 5,
     }
 
     internal sealed class ItemConsumeUpdate

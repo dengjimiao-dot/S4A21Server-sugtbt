@@ -14,6 +14,7 @@ namespace DfoServer.Game.Dungeon
         MissingPermission = 7,
         NotPartyLeader = 8,
         DungeonNotFound = 9,
+        MissingPrerequisite = 10,
     }
 
     internal readonly struct DungeonAdmissionReject
@@ -83,6 +84,12 @@ namespace DfoServer.Game.Dungeon
             byte memberSlot)
             => ForMember(
                 DungeonAdmissionRejectReason.MissingPermission,
+                memberSlot);
+
+        internal static DungeonAdmissionReject MissingPrerequisite(
+            byte memberSlot)
+            => ForMember(
+                DungeonAdmissionRejectReason.MissingPrerequisite,
                 memberSlot);
 
         private static DungeonAdmissionReject ForMember(

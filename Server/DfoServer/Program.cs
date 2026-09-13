@@ -64,6 +64,10 @@ namespace DfoServer
             ("--selftest-pvf-map-monster-parsing", SelfTests.PvfMapMonsterParsingSelfTest.Run),
             ("--selftest-sequential-dungeon-info-protocol", SelfTests.SequentialDungeonInfoProtocolSelfTest.Run),
             ("--selftest-licensed-dungeon", SelfTests.LicensedDungeonSelfTest.Run),
+            ("--selftest-anton-awakening-daily-reset", SelfTests.AntonAwakeningDailyResetSelfTest.Run),
+            ("--selftest-anton-awakening-daily-progress", SelfTests.AntonAwakeningDailyProgressSelfTest.Run),
+            ("--selftest-anton-awakening-reward-packet", SelfTests.AntonAwakeningRewardPacketBuilderSelfTest.Run),
+            ("--selftest-anton-awakening-auto-reward", SelfTests.AntonAwakeningAutoRewardSelfTest.Run),
             ("--selftest-experience-item-definition", SelfTests.ExperienceItemDefinitionSelfTest.Run),
         };
 

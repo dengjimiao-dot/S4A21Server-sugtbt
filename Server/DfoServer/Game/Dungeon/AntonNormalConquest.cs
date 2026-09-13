@@ -52,16 +52,19 @@ namespace DfoServer.Game.Dungeon
         internal AntonNormalSyncState(
             AntonNormalSequence sequence,
             byte progressIndex,
-            List<DungeonPermissionEntrySnapshot> permissionEntries)
+            List<DungeonPermissionEntrySnapshot> permissionEntries,
+            int routeMask = 0)
         {
             Sequence = sequence;
             ProgressIndex = progressIndex;
             PermissionEntries = permissionEntries;
+            RouteMask = routeMask;
         }
 
         internal AntonNormalSequence Sequence { get; }
         internal byte ProgressIndex { get; }
         internal List<DungeonPermissionEntrySnapshot> PermissionEntries { get; }
+        internal int RouteMask { get; }
     }
 
     internal static class AntonNormalConquest
@@ -75,6 +78,21 @@ namespace DfoServer.Game.Dungeon
         {
             plan = null;
             if (!TryGetSequence(clearedDungeonId, out var sequence))
+                return false;
+
+            return TryResolveClearPlan(
+                sequence,
+                clearedDungeonId,
+                out plan);
+        }
+
+        internal static bool TryResolveClearPlan(
+            AntonNormalSequence sequence,
+            int clearedDungeonId,
+            out AntonNormalClearPlan plan)
+        {
+            plan = null;
+            if (sequence == null)
                 return false;
 
             var currentIndex = sequence.IndexOf(clearedDungeonId);

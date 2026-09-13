@@ -21,6 +21,10 @@ namespace DfoServer.Game.Dungeon
     {
         internal const string MonsterKill = "monster-kill-participant";
         internal const string DungeonClear = "dungeon-clear-participant";
+        internal const string AntonAwakeningAutoReward =
+            "anton-awakening-auto-reward";
+        internal const string AntonAwakeningRewardProjection =
+            "anton-awakening-reward-projection";
     }
 
     // A roster entry is a frozen participant identity, not a live party lookup.
@@ -35,6 +39,25 @@ namespace DfoServer.Game.Dungeon
             DungeonRunIdentity runIdentity,
             DungeonRoomIdentity roomIdentity,
             long attachmentGeneration)
+            : this(
+                characterId,
+                participantUserId,
+                run,
+                runIdentity,
+                roomIdentity,
+                attachmentGeneration,
+                byte.MaxValue)
+        {
+        }
+
+        internal DungeonParticipantRosterEntry(
+            int characterId,
+            ushort participantUserId,
+            DungeonRun run,
+            DungeonRunIdentity runIdentity,
+            DungeonRoomIdentity roomIdentity,
+            long attachmentGeneration,
+            byte partySlot)
         {
             if (characterId <= 0)
                 throw new ArgumentOutOfRangeException(nameof(characterId));
@@ -53,6 +76,7 @@ namespace DfoServer.Game.Dungeon
             RunIdentity = runIdentity;
             RoomIdentity = roomIdentity;
             AttachmentGeneration = attachmentGeneration;
+            PartySlot = partySlot;
         }
 
         internal int CharacterId { get; }
@@ -61,6 +85,7 @@ namespace DfoServer.Game.Dungeon
         internal DungeonRunIdentity RunIdentity { get; }
         internal DungeonRoomIdentity RoomIdentity { get; }
         internal long AttachmentGeneration { get; }
+        internal byte PartySlot { get; }
     }
 
     internal readonly struct DungeonParticipantEffectReservation

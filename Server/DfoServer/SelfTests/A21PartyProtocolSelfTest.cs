@@ -8,6 +8,7 @@ using DfoServer.Network.Builders;
 using DfoServer.Network.Builders.Party;
 using DfoServer.Network.Handlers;
 using DfoServer.Network.Handlers.Dungeon;
+using DfoServer.Network.Parsers.Dungeon;
 using DfoServer.Network.Parsers.Party;
 using DfoServer.Network.Parsers.Town;
 using System;
@@ -1550,6 +1551,112 @@ namespace DfoServer.SelfTests
                         unboundSelection,
                         party: null),
                 ref failures);
+            var antonLeaderSession = Guid.NewGuid();
+            var antonFollowerSession = Guid.NewGuid();
+            var antonSettlementParty = new Party(24700)
+            {
+                LeaderUserId = 24701,
+            };
+            antonSettlementParty.TryAddMember(new PartyMember
+            {
+                UserId = 24701,
+                CharacterId = 24701,
+                SessionId = antonLeaderSession,
+                Name = "anton-leader",
+            });
+            antonSettlementParty.TryAddMember(new PartyMember
+            {
+                UserId = 24702,
+                CharacterId = 24702,
+                SessionId = antonFollowerSession,
+                Name = "anton-follower",
+            });
+            var clearedAntonRun = new DungeonRun(247, 2)
+            {
+                Phase = DungeonRunPhase.Cleared,
+            };
+            var activeAntonRun = new DungeonRun(247, 2);
+            var clearedOtherRun = new DungeonRun(246, 2)
+            {
+                Phase = DungeonRunPhase.Cleared,
+            };
+            var antonDuplicateSelect = SelectDungeonRequest.Parse(new byte[]
+            {
+                0xF7, 0x00, 0x00, 0x00,
+                0x02, 0x00, 0x00, 0xFF, 0xFF,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            });
+            var antonDifferentDifficulty = SelectDungeonRequest.Parse(new byte[]
+            {
+                0xF7, 0x00, 0x00, 0x00,
+                0x01, 0x00, 0x00, 0xFF, 0xFF,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            });
+            var antonNonCanonicalSelect = SelectDungeonRequest.Parse(new byte[]
+            {
+                0xF7, 0x00, 0x00, 0x00,
+                0x02, 0x00, 0x00, 0xFF, 0xFF,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+            });
+            Check(
+                "cleared Anton follower duplicate SELECT_DUNGEON is ignored only for the captured A21 shape",
+                DungeonEntryHandler
+                    .ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                        clearedAntonRun,
+                        antonSettlementParty,
+                        24702,
+                        antonFollowerSession,
+                        antonDuplicateSelect)
+                && !DungeonEntryHandler
+                    .ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                        clearedAntonRun,
+                        antonSettlementParty,
+                        24701,
+                        antonLeaderSession,
+                        antonDuplicateSelect)
+                && !DungeonEntryHandler
+                    .ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                        activeAntonRun,
+                        antonSettlementParty,
+                        24702,
+                        antonFollowerSession,
+                        antonDuplicateSelect)
+                && !DungeonEntryHandler
+                    .ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                        clearedOtherRun,
+                        antonSettlementParty,
+                        24702,
+                        antonFollowerSession,
+                        antonDuplicateSelect)
+                && !DungeonEntryHandler
+                    .ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                        clearedAntonRun,
+                        antonSettlementParty,
+                        24702,
+                        antonFollowerSession,
+                        antonDifferentDifficulty)
+                && !DungeonEntryHandler
+                    .ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                        clearedAntonRun,
+                        antonSettlementParty,
+                        24702,
+                        antonFollowerSession,
+                        antonNonCanonicalSelect)
+                && !DungeonEntryHandler
+                    .ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                        clearedAntonRun,
+                        party: null,
+                        userId: 24702,
+                        sessionId: antonFollowerSession,
+                        antonDuplicateSelect)
+                && !DungeonEntryHandler
+                    .ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                        clearedAntonRun,
+                        antonSettlementParty,
+                        24702,
+                        Guid.NewGuid(),
+                        antonDuplicateSelect),
+                ref failures);
             var transferToFollowerAgain = transferManager.TransferLeader(
                 transferPartyId,
                 11001,
@@ -1987,7 +2094,7 @@ namespace DfoServer.SelfTests
                     exitTriggeredWipe.DeadlineUtc),
                 ref failures);
 
-            var teleportBody = new byte[]
+var teleportBody = new byte[]
             {
                 0x02, 0x02, 0x3E, 0x08, 0x40, 0x01, 0x05, 0x01,
             };
@@ -2044,6 +2151,48 @@ namespace DfoServer.SelfTests
                 Town.TryGetAreaPermission(5, 1, out var shelterPermission)
                 && shelterPermission != null
                 && shelterPermission.NeedLevel == 46,
+                ref failures);
+
+            var missingAntonPrerequisite = new EntryCostResult().Fail(
+                "anton awakening prerequisites missing=245",
+                EntryCostFailureKind.MissingPrerequisite);
+            var followerReject = DungeonAdmissionRejectBuilder.Build(
+                DungeonEntryHandler.ResolveEntryAdmissionReject(
+                    missingAntonPrerequisite,
+                    memberSlot: 1));
+            var leaderReject = DungeonAdmissionRejectBuilder.Build(
+                DungeonEntryHandler.ResolveEntryAdmissionReject(
+                    missingAntonPrerequisite,
+                    memberSlot: 0));
+            var ordinaryPermissionReject =
+                DungeonAdmissionRejectBuilder.Build(
+                    DungeonEntryHandler.ResolveEntryAdmissionReject(
+                        new EntryCostResult().Fail(
+                            "ordinary permission missing",
+                            EntryCostFailureKind.MissingPermission),
+                        memberSlot: 1));
+            var invalidReject = DungeonAdmissionRejectBuilder.Build(
+                DungeonEntryHandler.ResolveEntryAdmissionReject(
+                    new EntryCostResult().Fail(
+                        "anton awakening progress unavailable",
+                        EntryCostFailureKind.InvalidState),
+                    memberSlot: 1));
+            Check(
+                "missing Anton prerequisite uses the native party unmet-condition code",
+                followerReject.SequenceEqual(
+                    new byte[] { 0x00, 0x07, 0x00 })
+                && leaderReject.SequenceEqual(
+                    new byte[] { 0x00, 0x07, 0x00 }),
+                ref failures);
+            Check(
+                "ordinary member permission keeps the member-level permission code",
+                ordinaryPermissionReject.SequenceEqual(
+                    new byte[] { 0x00, 0xAD, 0x01 }),
+                ref failures);
+            Check(
+                "Anton progress database failure is not mislabeled as missing permission",
+                invalidReject.SequenceEqual(
+                    new byte[] { 0x00, 0x13, 0x00 }),
                 ref failures);
 
             Console.WriteLine($"A21_PARTY_PROTOCOL failures={failures}");

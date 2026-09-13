@@ -247,6 +247,51 @@ namespace DfoServer.Network.Handlers.Dungeon
                && selection.PartyCohort == null
                && party?.Count > 1;
 
+        internal static bool ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+            DungeonRun run,
+            Game.Party.Party party,
+            ushort userId,
+            Guid sessionId,
+            SelectDungeonRequest request)
+        {
+            if (run == null
+                || run.RunState != DungeonRunState.Cleared
+                || run.DungeonId
+                    != AntonAwakeningDailyCardService.FinalDungeonId
+                || request.DungeonId != run.DungeonId
+                || request.Difficulty != run.Difficulty
+                || request.Flag1 != 0
+                || request.Flag2 != 0
+                || request.A21Sentinel != 0xFFFF
+                || request.TrailingLength != 6
+                || request.HasNonZeroTrailingBytes
+                || party == null
+                || party.Count <= 1
+                || party.IsLeader(userId))
+            {
+                return false;
+            }
+
+            var member = party.GetMember(userId);
+            return member != null && member.SessionId == sessionId;
+        }
+
+        private static bool TryParseSelectDungeonRequest(
+            byte[] body,
+            out SelectDungeonRequest request)
+        {
+            try
+            {
+                request = SelectDungeonRequest.Parse(body);
+                return true;
+            }
+            catch (ArgumentException)
+            {
+                request = default;
+                return false;
+            }
+        }
+
         private static bool HasValidDungeonUserInfoIdentity(
             DungeonPartySelectionParticipant participant)
             => participant.UserId != 0
@@ -368,18 +413,24 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             var configKey = BitConverter.ToInt32(body, 0);
-            var progress = _svc.PersistentMechanisms.ResolveSequentialProgress(
+            _svc.PersistentMechanisms.TryResolveSequentialState(
                 player.CharacterId,
-                configKey);
+                configKey,
+                out var state);
+            var progress = state?.ProgressIndex ?? (byte)0;
+            var routeMask = state?.RouteMask ?? 0;
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
                 0x00,
                 (ushort)NotiPacketTypeA21.SEQUENTIAL_DUNGEON_INFO,
                 DungeonNotificationBuilder.BuildSequentialDungeonInfo(
-                    configKey, progress, 0)));
+                    configKey,
+                    progress,
+                    routeMask)));
             FileLogger.Log(
                 $"[{DungeonSharedServices.ProtocolLogName}] " +
                 $"SEQUENTIAL_DUNGEON_INFO answered: " +
-                $"cid={player.CharacterId} key={configKey} progress={progress}");
+                $"cid={player.CharacterId} key={configKey} " +
+                $"progress={progress} routeMask=0x{routeMask:X2}");
         }
 
         internal async Task HandleEnterSelectDungeon(EnhancedClientSession session, GamePacketHeader header, byte[] body)
@@ -2038,6 +2089,34 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
             if (!expectedPredecessorIdentity.HasValue
+                && predecessorRun != null
+                && TryParseSelectDungeonRequest(
+                    body,
+                    out var duplicateSelectRequest))
+            {
+                var duplicateSelectParty = session?.Player == null
+                    ? null
+                    : _svc.PartyManager?.GetPartySnapshotByUser(
+                        session.Player.UserId);
+                if (ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                        predecessorRun,
+                        duplicateSelectParty,
+                        session?.Player?.UserId ?? 0,
+                        session?.SessionId ?? Guid.Empty,
+                        duplicateSelectRequest))
+                {
+                    FileLogger.Log(
+                        $"[{DungeonSharedServices.ProtocolLogName}] " +
+                        "SELECT_DUNGEON ignored cleared Anton follower " +
+                        $"duplicate: cid={session.Player.CharacterId} " +
+                        $"run={predecessorRun.RunId} " +
+                        $"party={duplicateSelectParty.PartyId} " +
+                        $"dungeon={duplicateSelectRequest.DungeonId} " +
+                        $"difficulty={duplicateSelectRequest.Difficulty}");
+                    return;
+                }
+            }
+            if (!expectedPredecessorIdentity.HasValue
                 && (predecessorRun != null
                     || expectedSelection == null
                     || !IsEntrySourceCurrent(
@@ -2160,6 +2239,26 @@ namespace DfoServer.Network.Handlers.Dungeon
                     expectedSelection,
                     header.type,
                     DungeonAdmissionReject.DungeonUnavailable);
+                return;
+            }
+            if (!TryEvaluateAntonAwakeningEntry(
+                    session.Player.CharacterId,
+                    req.DungeonId,
+                    out var antonEntryValidation))
+            {
+                FileLogger.Log(
+                    $"[{DungeonSharedServices.ProtocolLogName}] " +
+                    $"SELECT_DUNGEON Anton admission rejected: " +
+                    $"cid={session.Player.CharacterId} " +
+                    $"dungeon={req.DungeonId} " +
+                    $"reason={antonEntryValidation.FailReason}");
+                await RejectSelectionAsync(
+                    session,
+                    expectedSelection,
+                    header.type,
+                    ResolveEntryAdmissionReject(
+                        antonEntryValidation,
+                        ResolvePartySlot(session)));
                 return;
             }
 
@@ -3724,6 +3823,13 @@ namespace DfoServer.Network.Handlers.Dungeon
                     EntryCostFailureKind.MissingPermission);
                 return false;
             }
+            if (!TryEvaluateAntonAwakeningEntry(
+                    session.Player.CharacterId,
+                    run.DungeonId,
+                    out validation))
+            {
+                return false;
+            }
             if (!TryLoadEntryQuestSets(
                     session.Player.CharacterId,
                     out var activeQuestIds,
@@ -3784,6 +3890,39 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return false;
             }
             return true;
+        }
+
+        private bool TryEvaluateAntonAwakeningEntry(
+            int characterId,
+            int dungeonId,
+            out EntryCostResult validation)
+        {
+            validation = null;
+            try
+            {
+                var anton = _svc.PersistentMechanisms.EvaluateEntryAdmission(
+                    characterId,
+                    dungeonId);
+                if (anton.Allowed)
+                    return true;
+
+                validation = new EntryCostResult().Fail(
+                    "anton awakening prerequisites missing="
+                        + string.Join(",", anton.MissingDungeonIds),
+                    EntryCostFailureKind.MissingPrerequisite);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[AntonAwakeningProgress] admission unavailable: " +
+                    $"cid={characterId} dungeon={dungeonId} " +
+                    $"error={ex.Message}");
+                validation = new EntryCostResult().Fail(
+                    "anton awakening progress unavailable",
+                    EntryCostFailureKind.InvalidState);
+                return false;
+            }
         }
 
         private bool TryLoadEntryQuestSets(
@@ -4472,6 +4611,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 case EntryCostFailureKind.MissingRequiredItem:
                     return DungeonAdmissionReject.MissingRequiredItem(memberSlot);
+                case EntryCostFailureKind.MissingPrerequisite:
+                    return DungeonAdmissionReject.MissingPrerequisite(memberSlot);
                 case EntryCostFailureKind.MissingPermission:
                     return DungeonAdmissionReject.MissingPermission(memberSlot);
                 case EntryCostFailureKind.Unavailable:

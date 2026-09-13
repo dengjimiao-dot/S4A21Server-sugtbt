@@ -22,6 +22,8 @@ namespace DfoServer.Network.Builders
                     return 0x11;
                 case DungeonAdmissionRejectReason.InsufficientFatigue:
                     return 0x16;
+                case DungeonAdmissionRejectReason.MissingPrerequisite:
+                    return 0x07;
                 case DungeonAdmissionRejectReason.MemberEntryLimitReached:
                 case DungeonAdmissionRejectReason.MissingPermission:
                     return 0xAD;
