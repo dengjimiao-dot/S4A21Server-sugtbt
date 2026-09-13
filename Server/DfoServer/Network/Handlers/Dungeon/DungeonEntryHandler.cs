@@ -255,9 +255,12 @@ namespace DfoServer.Network.Handlers.Dungeon
             SelectDungeonRequest request)
         {
             if (run == null
-                || run.RunState != DungeonRunState.Cleared
-                || run.DungeonId
-                    != AntonAwakeningDailyCardService.FinalDungeonId
+                || (run.RunState != DungeonRunState.ClearCommitting
+                    && run.RunState != DungeonRunState.Cleared)
+                || !AntonNormalConquest.TryGetSequenceByKey(
+                    AntonAwakeningDailyProgressService.ConfigKey,
+                    out var sequence)
+                || sequence.IndexOf(run.DungeonId) < 0
                 || request.DungeonId != run.DungeonId
                 || request.Difficulty != run.Difficulty
                 || request.Flag1 != 0
@@ -2041,6 +2044,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             AnotherAradSelection? anotherAradSelection)
         {
             var initialSelection = session?.Player?.CurrentDungeonSelection;
+            var predecessorRun = session?.Player?.CurrentRun;
             if (!CanEnterRaidDungeonSelection(session))
             {
                 FileLogger.Log(
@@ -2071,7 +2075,6 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            var predecessorRun = session?.Player?.CurrentRun;
             var predecessorGeneration =
                 session?.Player?.CurrentDungeonRunGeneration ?? 0;
             var expectedSelection = expectedPredecessorIdentity.HasValue
@@ -2086,16 +2089,17 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
             if (!expectedPredecessorIdentity.HasValue
-                && predecessorRun != null
-                && TryParseSelectDungeonRequest(
-                    body,
-                    out var duplicateSelectRequest))
+                && predecessorRun != null)
             {
                 var duplicateSelectParty = session?.Player == null
                     ? null
                     : _svc.PartyManager?.GetPartySnapshotByUser(
                         session.Player.UserId);
-                if (ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                var parsedDuplicateSelect = TryParseSelectDungeonRequest(
+                    body,
+                    out var duplicateSelectRequest);
+                if (parsedDuplicateSelect
+                    && ShouldIgnoreClearedAntonFollowerDuplicateSelect(
                         predecessorRun,
                         duplicateSelectParty,
                         session?.Player?.UserId ?? 0,
@@ -2104,8 +2108,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 {
                     FileLogger.Log(
                         $"[{DungeonSharedServices.ProtocolLogName}] " +
-                        "SELECT_DUNGEON ignored cleared Anton follower " +
-                        $"duplicate: cid={session.Player.CharacterId} " +
+                        "SELECT_DUNGEON ignored settling Anton awakening " +
+                        $"follower duplicate: cid={session.Player.CharacterId} " +
                         $"run={predecessorRun.RunId} " +
                         $"party={duplicateSelectParty.PartyId} " +
                         $"dungeon={duplicateSelectRequest.DungeonId} " +

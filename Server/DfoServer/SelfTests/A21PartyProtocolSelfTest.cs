@@ -1575,14 +1575,40 @@ namespace DfoServer.SelfTests
             {
                 Phase = DungeonRunPhase.Cleared,
             };
+            var clearedAnton243Run = new DungeonRun(243, 2)
+            {
+                Phase = DungeonRunPhase.Cleared,
+            };
+            var committingAnton243Run = new DungeonRun(243, 2);
+            var committingAnton243Fact =
+                committingAnton243Run.Instance.GetOrCreateClearedFact(
+                    new DungeonClearIntent(
+                        DungeonEventEnvelope.Create(
+                            committingAnton243Run,
+                            24702,
+                            "anton-follower-duplicate-test"),
+                        "anton-follower-duplicate-test",
+                        bossCode: 0),
+                    out _);
+            Check(
+                "Anton 243 test run enters ClearCommitting",
+                committingAnton243Run.TryBeginClearCommit(
+                    committingAnton243Fact),
+                ref failures);
             var activeAntonRun = new DungeonRun(247, 2);
-            var clearedOtherRun = new DungeonRun(246, 2)
+            var clearedOtherRun = new DungeonRun(192, 2)
             {
                 Phase = DungeonRunPhase.Cleared,
             };
             var antonDuplicateSelect = SelectDungeonRequest.Parse(new byte[]
             {
                 0xF7, 0x00, 0x00, 0x00,
+                0x02, 0x00, 0x00, 0xFF, 0xFF,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            });
+            var anton243DuplicateSelect = SelectDungeonRequest.Parse(new byte[]
+            {
+                0xF3, 0x00, 0x00, 0x00,
                 0x02, 0x00, 0x00, 0xFF, 0xFF,
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             });
@@ -1599,8 +1625,22 @@ namespace DfoServer.SelfTests
                 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
             });
             Check(
-                "cleared Anton follower duplicate SELECT_DUNGEON is ignored only for the captured A21 shape",
+                "settling Anton follower duplicate SELECT_DUNGEON is ignored only for the captured A21 15-byte shape",
                 DungeonEntryHandler
+                    .ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                        clearedAnton243Run,
+                        antonSettlementParty,
+                        24702,
+                        antonFollowerSession,
+                        anton243DuplicateSelect)
+                && DungeonEntryHandler
+                    .ShouldIgnoreClearedAntonFollowerDuplicateSelect(
+                        committingAnton243Run,
+                        antonSettlementParty,
+                        24702,
+                        antonFollowerSession,
+                        anton243DuplicateSelect)
+                && DungeonEntryHandler
                     .ShouldIgnoreClearedAntonFollowerDuplicateSelect(
                         clearedAntonRun,
                         antonSettlementParty,
