@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using DfoServer.Game.DailyReset;
 using DfoServer.Game.Dungeon;
+using DfoServer.Game.Inventory;
 using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
@@ -31,6 +32,7 @@ namespace DfoServer.SelfTests
             VerifyTwoStageRewardResolution(ref failures);
             VerifyMalformedRewardPoolsFailClosed(ref failures);
             VerifyRewardDrawPreservesState(ref failures);
+            VerifyCurrentPvfPreparedPools(ref failures);
             VerifyRewardClaimRollback(ref failures);
             VerifyCrossDayReset(ref failures);
             Console.WriteLine(
@@ -62,25 +64,27 @@ namespace DfoServer.SelfTests
         {
             const string rewards =
                 "915 10157831 0 10 10157832 1 5 10157833 2 70 10157834 1";
-            var candidates = ParseRewardCandidates(
+            var definition = ParseRewardDefinition(
                 BuildSequentialRewardConfig(26, 41, rewards));
 
-            Check("key 41 parser finds four entries", candidates != null && candidates.Count == 4, ref failures);
+            Check("key 41 parser finds four entries", definition?.ClearRewardGroups.Count == 4, ref failures);
             Check(
                 "key 41 parser preserves weights",
-                candidates != null
-                && candidates.Select(value => value.Weight).SequenceEqual(new[] { 915, 10, 5, 70 }),
+                definition != null
+                && definition.ClearRewardGroups.Select(value => value.Weight)
+                    .SequenceEqual(new[] { 915, 10, 5, 70 }),
                 ref failures);
             Check(
                 "key 41 parser preserves item IDs",
-                candidates != null
-                && candidates.Select(value => value.Reward.ItemId)
+                definition != null
+                && definition.ClearRewardGroups
+                    .Select(value => value.RewardGroupItemId)
                     .SequenceEqual(ExpectedStates.Keys),
                 ref failures);
             Check(
                 "key 41 parser preserves PVF states",
-                candidates != null
-                && candidates.Select(value => value.Reward.State)
+                definition != null
+                && definition.ClearRewardGroups.Select(value => value.CardState)
                     .SequenceEqual(ExpectedStates.Values),
                 ref failures);
         }
@@ -101,7 +105,7 @@ namespace DfoServer.SelfTests
             Check(
                 "malformed key 41 definitions fail closed",
                 malformed.All(value =>
-                    ParseRewardCandidates(value) == null),
+                    ParseRewardDefinition(value) == null),
                 ref failures);
         }
 
@@ -140,9 +144,15 @@ namespace DfoServer.SelfTests
                         ? BuildUpgradableLegacy((91000, 1, 2))
                         : null,
                 maximum => rolls.Dequeue());
+            var preparedOk = service.TryPrepareRewardPools(
+                definition,
+                247,
+                out var prepared,
+                out _);
             Check(
                 "outer group and inner STK weights resolve final item/quantity",
-                service.TryDrawReward(definition, 247, out var reward)
+                preparedOk
+                && service.TryDrawPreparedReward(prepared, out var reward, out _)
                     && reward.GroupKey == 99
                     && reward.RewardableDungeonId == 247
                     && reward.RewardGroupItemId == 7002
@@ -153,7 +163,7 @@ namespace DfoServer.SelfTests
 
             Check(
                 "each participant consumes independent outer and inner rolls",
-                service.TryDrawReward(definition, 247, out var second)
+                service.TryDrawPreparedReward(prepared, out var second, out _)
                     && second.ItemId == 91000
                     && second.Quantity == 2
                     && rolls.Count == 4,
@@ -174,12 +184,70 @@ namespace DfoServer.SelfTests
                     _ => 0);
                 Check(
                     "invalid or empty STK fails closed",
-                    !malformedService.TryDrawReward(
+                    !malformedService.TryPrepareRewardPools(
                         definition,
                         247,
+                        out _,
                         out _),
                     ref failures);
             }
+
+            var validationRollCalls = 0;
+            var lateInvalidService = new AntonAwakeningDailyCardService(
+                null,
+                itemId => itemId == 7001
+                    ? BuildUpgradableLegacy((90001, 1, 1))
+                    : BuildUpgradableLegacy((90002, 1, 0)),
+                _ =>
+                {
+                    validationRollCalls++;
+                    return 0;
+                });
+            Check(
+                "all outer STK pools are validated before the first RNG call",
+                !lateInvalidService.TryPrepareRewardPools(
+                    definition,
+                    247,
+                    out _,
+                    out _)
+                && validationRollCalls == 0,
+                ref failures);
+
+            var parsedInvalidCount = StackableItemFile.Parse(
+                "[stackable type]\n`[upgradable legacy]`\n[/stackable type]\n"
+                + "[int data]\n90001 1 0\n[/int data]");
+            Check(
+                "PvfLib preserves non-positive upgradable legacy count",
+                parsedInvalidCount.UpgradableLegacyRewards.Count == 1
+                && parsedInvalidCount.UpgradableLegacyRewards[0].Count == 0,
+                ref failures);
+            var parsedInvalidService = new AntonAwakeningDailyCardService(
+                null,
+                _ => parsedInvalidCount,
+                _ => 0);
+            Check(
+                "parsed zero-count STK is rejected before rolling",
+                !parsedInvalidService.TryPrepareRewardPools(
+                    definition,
+                    247,
+                    out _,
+                    out _),
+                ref failures);
+
+            var randomLegacy = BuildUpgradableLegacy((90001, 1, 1));
+            randomLegacy.StackableType = "[random upgradable legacy]";
+            var randomLegacyService = new AntonAwakeningDailyCardService(
+                null,
+                _ => randomLegacy,
+                _ => 0);
+            Check(
+                "random upgradable legacy is not reinterpreted as a legacy pool",
+                !randomLegacyService.TryPrepareRewardPools(
+                    definition,
+                    247,
+                    out _,
+                    out _),
+                ref failures);
         }
 
         private static StackableItemFile BuildUpgradableLegacy(
@@ -205,23 +273,78 @@ namespace DfoServer.SelfTests
 
         private static void VerifyRewardDrawPreservesState(ref int failures)
         {
-            var candidates = ParseRewardCandidates(
+            var definition = ParseRewardDefinition(
                 BuildSequentialRewardConfig(
                     26,
                     41,
                     "1 10157831 0 1 10157832 1 1 10157833 2 1 10157834 1"));
-            var service = new AntonAwakeningDailyCardService(null, candidates);
-            for (var index = 0; index < 64; index++)
+            var groups = definition?.ClearRewardGroups;
+            for (var index = 0; index < (groups?.Count ?? 0); index++)
             {
-                var drawn = service.TryDrawReward(out var reward);
+                var rolls = new Queue<int>(new[] { index, 0 });
+                var service = new AntonAwakeningDailyCardService(
+                    null,
+                    _ => BuildUpgradableLegacy((90000 + index, 1, index + 1)),
+                    _ => rolls.Dequeue());
+                var preparedOk = service.TryPrepareRewardPools(
+                    definition,
+                    247,
+                    out var prepared,
+                    out _);
+                var reward = default(AntonAwakeningRewardDefinition);
+                var drawn = preparedOk
+                    && service.TryDrawPreparedReward(
+                        prepared,
+                        out reward,
+                        out _);
                 Check($"draw {index} succeeds", drawn, ref failures);
                 Check(
                     $"draw {index} keeps item/state pair",
                     drawn
-                    && ExpectedStates.TryGetValue(reward.ItemId, out var expectedState)
-                    && reward.State == expectedState,
+                    && reward.RewardGroupItemId
+                        == groups[index].RewardGroupItemId
+                    && reward.State == groups[index].CardState,
                     ref failures);
             }
+        }
+
+        private static void VerifyCurrentPvfPreparedPools(ref int failures)
+        {
+            var catalog = SequentialDungeonDefinitionCatalog.Current;
+            var resolved = catalog.TryResolveRewardableByDungeonId(
+                247,
+                out var definition);
+            var service = new AntonAwakeningDailyCardService(
+                null,
+                StackableItemProvider.Load,
+                _ => 0);
+            AntonAwakeningPreparedRewardPools prepared = null;
+            var preparedOk = resolved
+                && service.TryPrepareRewardPools(
+                    definition,
+                    247,
+                    out prepared,
+                    out _);
+            Check(
+                "current PVF prepares all four upgradable legacy reward groups",
+                preparedOk
+                && prepared.Groups.Count == 4
+                && prepared.Groups.All(group =>
+                    group.Entries.Count > 0
+                    && group.Entries.All(entry =>
+                        entry.ItemId > 0
+                        && entry.Weight > 0
+                        && entry.Quantity > 0)),
+                ref failures);
+            Check(
+                "current PVF prepared pool draws a legal final reward",
+                preparedOk
+                && service.TryDrawPreparedReward(
+                    prepared,
+                    out var reward,
+                    out _)
+                && reward.IsValid,
+                ref failures);
         }
 
         private static void VerifyRewardClaimRollback(ref int failures)
@@ -233,19 +356,25 @@ namespace DfoServer.SelfTests
                     var localFailures = 0;
                     var service = new AntonAwakeningDailyCardService(
                         dailyReset,
-                        Array.Empty<AntonAwakeningRewardCandidate>());
+                        _ => null,
+                        _ => 0);
                     using (var connection = database.OpenConnection())
                     using (var transaction = connection.BeginTransaction())
                     {
                         Check(
                             "transactional reward claim succeeds",
-                            service.TryClaimReward(connection, transaction, characterId),
+                            service.TryClaimReward(
+                                connection,
+                                transaction,
+                                characterId,
+                                41,
+                                247),
                             ref localFailures);
                         transaction.Rollback();
                     }
                     Check(
                         "rolled-back reward claim remains unclaimed",
-                        !service.HasClaimedRewardToday(characterId),
+                        !service.HasClaimedRewardToday(characterId, 41, 247),
                         ref localFailures);
                     return localFailures;
                 });
@@ -260,15 +389,17 @@ namespace DfoServer.SelfTests
                     var localFailures = 0;
                     var service = new AntonAwakeningDailyCardService(
                         dailyReset,
-                        Array.Empty<AntonAwakeningRewardCandidate>());
-                    Check("first daily reward claim succeeds", service.TryClaimReward(characterId), ref localFailures);
-                    Check("reward reports claimed", service.HasClaimedRewardToday(characterId), ref localFailures);
+                        _ => null,
+                        _ => 0);
+                    Check("first daily reward claim succeeds", service.TryClaimReward(characterId, 41, 247), ref localFailures);
+                    Check("reward reports claimed", service.HasClaimedRewardToday(characterId, 41, 247), ref localFailures);
                     var restartedService = new AntonAwakeningDailyCardService(
                         new DailyResetService(database),
-                        Array.Empty<AntonAwakeningRewardCandidate>());
+                        _ => null,
+                        _ => 0);
                     Check(
                         "same-day reward claim survives service restart",
-                        restartedService.HasClaimedRewardToday(characterId),
+                        restartedService.HasClaimedRewardToday(characterId, 41, 247),
                         ref localFailures);
                     using (var connection = database.OpenConnection())
                     using (var command = connection.CreateCommand())
@@ -280,14 +411,15 @@ namespace DfoServer.SelfTests
                     }
                     var nextDayService = new AntonAwakeningDailyCardService(
                         new DailyResetService(database),
-                        Array.Empty<AntonAwakeningRewardCandidate>());
+                        _ => null,
+                        _ => 0);
                     Check(
                         "day rollover clears reward claim after service restart",
-                        !nextDayService.HasClaimedRewardToday(characterId),
+                        !nextDayService.HasClaimedRewardToday(characterId, 41, 247),
                         ref localFailures);
                     Check(
                         "next-day reward claim succeeds",
-                        nextDayService.TryClaimReward(characterId),
+                        nextDayService.TryClaimReward(characterId, 41, 247),
                         ref localFailures);
                     return localFailures;
                 });
@@ -325,8 +457,8 @@ namespace DfoServer.SelfTests
 [/sequential dungeon]";
         }
 
-        private static IReadOnlyList<AntonAwakeningRewardCandidate>
-            ParseRewardCandidates(string config)
+        private static SequentialDungeonDefinition ParseRewardDefinition(
+            string config)
         {
             try
             {
@@ -339,18 +471,7 @@ namespace DfoServer.SelfTests
                     return null;
                 }
 
-                return definition.ClearRewardGroups
-                    .Select(group => new AntonAwakeningRewardCandidate(
-                        group.Weight,
-                        new AntonAwakeningRewardDefinition(
-                            definition.GroupKey,
-                            247,
-                            group.RewardGroupItemId,
-                            group.RewardGroupItemId,
-                            1,
-                            group.CardState)))
-                    .ToList()
-                    .AsReadOnly();
+                return definition;
             }
             catch
             {

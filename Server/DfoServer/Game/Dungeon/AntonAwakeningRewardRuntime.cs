@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using DfoServer.GameWorld;
 
 namespace DfoServer.Game.Dungeon
@@ -38,13 +39,34 @@ namespace DfoServer.Game.Dungeon
         internal IReadOnlyList<AntonAwakeningRewardPlanEntry> Entries { get; }
     }
 
-    // Instance-owned, in-process plan/result state. It deliberately contains no
-    // sessions or sockets; live ownership is resolved when an effect executes.
+    internal sealed class AntonAwakeningRewardPlanCreationOutcome
+    {
+        internal AntonAwakeningRewardPlanCreationOutcome(
+            AntonAwakeningRewardPlan plan,
+            AntonAwakeningRewardBatchResolution resolution)
+        {
+            Plan = plan;
+            Resolution = resolution
+                ?? new AntonAwakeningRewardBatchResolution(
+                    Array.Empty<AntonAwakeningParticipantRewardResolution>());
+        }
+
+        internal AntonAwakeningRewardPlan Plan { get; }
+        internal AntonAwakeningRewardBatchResolution Resolution { get; }
+    }
+
+    // Instance-owned, in-process plan/result state. The event-scoped Lazy is a
+    // creation gate: the runtime lock only publishes/reads it, while PVF load,
+    // validation and RNG execute once outside the runtime lock.
     internal sealed class AntonAwakeningRewardRuntime
     {
         private readonly object _syncRoot = new object();
-        private readonly Dictionary<Guid, AntonAwakeningRewardPlan> _plans =
-            new Dictionary<Guid, AntonAwakeningRewardPlan>();
+        private readonly Dictionary<
+            Guid,
+            Lazy<AntonAwakeningRewardPlanCreationOutcome>> _planCreations =
+                new Dictionary<
+                    Guid,
+                    Lazy<AntonAwakeningRewardPlanCreationOutcome>>();
         private readonly Dictionary<(
             Guid SourceEventId,
             DungeonParticipantRunIdentity Participant),
@@ -70,69 +92,72 @@ namespace DfoServer.Game.Dungeon
             int rewardableDungeonId,
             out AntonAwakeningRewardPlan plan)
         {
+            plan = null;
+            if (sourceEventId == Guid.Empty
+                || roster == null
+                || rewards == null)
+            {
+                return false;
+            }
+
+            var rosterSnapshot = roster.ToArray();
+            Lazy<AntonAwakeningRewardPlanCreationOutcome> creation;
             lock (_syncRoot)
             {
-                if (_plans.TryGetValue(sourceEventId, out plan))
-                    return true;
-                if (sourceEventId == Guid.Empty
-                    || roster == null
-                    || roster.Count == 0
-                    || rewards == null
-                    || !rewards.IsConfigured)
+                if (!_planCreations.TryGetValue(sourceEventId, out creation))
                 {
-                    plan = null;
-                    return false;
-                }
-
-                var entries = new List<AntonAwakeningRewardPlanEntry>();
-                var participants = new HashSet<DungeonParticipantRunIdentity>();
-                var userIds = new HashSet<ushort>();
-                foreach (var participant in roster
-                             .Where(value => value != null)
-                             .OrderBy(value => value.PartySlot)
-                             .ThenBy(value => value.ParticipantUserId)
-                             .ThenBy(value => value.CharacterId))
-                {
-                    AntonAwakeningRewardDefinition reward;
-                    var drawn = definition != null
-                        ? rewards.TryDrawReward(
+                    creation = new Lazy<AntonAwakeningRewardPlanCreationOutcome>(
+                        () => CreatePlan(
+                            sourceEventId,
+                            rosterSnapshot,
+                            rewards,
                             definition,
-                            rewardableDungeonId,
-                            out reward)
-                        : rewards.TryDrawReward(out reward);
-                    if (!participants.Add(
-                            participant.RunIdentity.ParticipantIdentity)
-                        || !userIds.Add(participant.ParticipantUserId)
-                        || !drawn)
-                    {
-                        plan = null;
-                        return false;
-                    }
-                    entries.Add(new AntonAwakeningRewardPlanEntry(
-                        participant,
-                        reward));
+                            rewardableDungeonId),
+                        LazyThreadSafetyMode.ExecutionAndPublication);
+                    _planCreations.Add(sourceEventId, creation);
                 }
-
-                if (entries.Count == 0)
-                {
-                    plan = null;
-                    return false;
-                }
-
-                plan = new AntonAwakeningRewardPlan(
-                    sourceEventId,
-                    entries.AsReadOnly());
-                _plans.Add(sourceEventId, plan);
-                return true;
             }
+
+            // Never evaluate the creation factory while holding _syncRoot.
+            var outcome = creation.Value;
+            plan = outcome.Plan;
+            return plan != null && plan.Entries.Count > 0;
         }
 
         internal bool TryGetPlan(
             Guid sourceEventId,
             out AntonAwakeningRewardPlan plan)
         {
+            plan = null;
+            Lazy<AntonAwakeningRewardPlanCreationOutcome> creation;
             lock (_syncRoot)
-                return _plans.TryGetValue(sourceEventId, out plan);
+            {
+                if (!_planCreations.TryGetValue(sourceEventId, out creation))
+                    return false;
+            }
+
+            var outcome = creation.Value;
+            plan = outcome.Plan;
+            return plan != null && plan.Entries.Count > 0;
+        }
+
+        internal bool TryGetParticipantResolution(
+            Guid sourceEventId,
+            DungeonParticipantRunIdentity participant,
+            out AntonAwakeningParticipantRewardResolution resolution)
+        {
+            resolution = null;
+            Lazy<AntonAwakeningRewardPlanCreationOutcome> creation;
+            lock (_syncRoot)
+            {
+                if (!_planCreations.TryGetValue(sourceEventId, out creation))
+                    return false;
+            }
+
+            resolution = creation.Value.Resolution.Participants
+                .FirstOrDefault(value => value.Participant.RunIdentity
+                    .ParticipantIdentity.Equals(participant));
+            return resolution != null;
         }
 
         internal bool TryRecordProjectionDeadline(
@@ -143,21 +168,17 @@ namespace DfoServer.Game.Dungeon
             deadlineUtc = NormalizeUtc(deadlineUtc);
             if (sourceEventId == Guid.Empty
                 || !participant.IsValid
-                || deadlineUtc == DateTime.MinValue)
+                || deadlineUtc == DateTime.MinValue
+                || !TryGetPlan(sourceEventId, out var plan)
+                || !plan.Entries.Any(value =>
+                    value.Participant.RunIdentity.ParticipantIdentity
+                        .Equals(participant)))
             {
                 return false;
             }
 
             lock (_syncRoot)
             {
-                if (!_plans.TryGetValue(sourceEventId, out var plan)
-                    || !plan.Entries.Any(value =>
-                        value.Participant.RunIdentity.ParticipantIdentity
-                            .Equals(participant)))
-                {
-                    return false;
-                }
-
                 var key = (sourceEventId, participant);
                 if (_projectionDeadlinesUtc.TryGetValue(key, out var existing))
                     return existing == deadlineUtc;
@@ -187,21 +208,17 @@ namespace DfoServer.Game.Dungeon
             if (sourceEventId == Guid.Empty
                 || !participant.IsValid
                 || result == null
-                || result.Outcome == AntonAwakeningRewardGrantOutcome.Failed)
+                || result.Outcome == AntonAwakeningRewardGrantOutcome.Failed
+                || !TryGetPlan(sourceEventId, out var plan)
+                || !plan.Entries.Any(value =>
+                    value.Participant.RunIdentity.ParticipantIdentity
+                        .Equals(participant)))
             {
                 return false;
             }
 
             lock (_syncRoot)
             {
-                if (!_plans.TryGetValue(sourceEventId, out var plan)
-                    || !plan.Entries.Any(value =>
-                        value.Participant.RunIdentity.ParticipantIdentity
-                            .Equals(participant)))
-                {
-                    return false;
-                }
-
                 var key = (sourceEventId, participant);
                 if (_committed.TryGetValue(key, out var existing))
                 {
@@ -227,6 +244,47 @@ namespace DfoServer.Game.Dungeon
         {
             lock (_syncRoot)
                 return _committed.TryGetValue((sourceEventId, participant), out result);
+        }
+
+        private static AntonAwakeningRewardPlanCreationOutcome CreatePlan(
+            Guid sourceEventId,
+            IReadOnlyList<DungeonParticipantRosterEntry> roster,
+            AntonAwakeningDailyCardService rewards,
+            SequentialDungeonDefinition definition,
+            int rewardableDungeonId)
+        {
+            AntonAwakeningRewardBatchResolution resolution;
+            try
+            {
+                resolution = rewards.ResolveParticipantRewards(
+                    sourceEventId,
+                    roster,
+                    definition,
+                    rewardableDungeonId);
+            }
+            catch (Exception ex)
+            {
+                resolution = rewards.FreezeUnexpectedFailure(
+                    sourceEventId,
+                    roster,
+                    definition,
+                    rewardableDungeonId,
+                    "unexpected " + ex.GetType().Name);
+            }
+
+            var entries = resolution.Participants
+                .Where(value => value.Succeeded && value.Reward.IsValid)
+                .Select(value => new AntonAwakeningRewardPlanEntry(
+                    value.Participant,
+                    value.Reward))
+                .ToList()
+                .AsReadOnly();
+            var plan = entries.Count > 0
+                ? new AntonAwakeningRewardPlan(sourceEventId, entries)
+                : null;
+            return new AntonAwakeningRewardPlanCreationOutcome(
+                plan,
+                resolution);
         }
 
         private static DateTime NormalizeUtc(DateTime value)

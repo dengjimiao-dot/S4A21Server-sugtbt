@@ -22,6 +22,8 @@ namespace DfoServer.SelfTests
             Console.WriteLine("=== ANTON_AWAKENING_AUTO_REWARD selftest ===");
             var failures = 0;
             VerifyStableInstancePlanAndJournal(ref failures);
+            VerifyFourParticipantIndependentPlanning(ref failures);
+            VerifyParticipantFailureIsolation(ref failures);
             VerifyDelayedProjectionState(ref failures);
             VerifyProjectionJournalRecovery(ref failures);
             VerifyTimerGrantAfterProjection(ref failures);
@@ -131,14 +133,10 @@ namespace DfoServer.SelfTests
                 out var freeReservation);
             run.Effects.TryCommit(freeReservation);
 
-            var rewards = new AntonAwakeningDailyCardService(
-                null,
-                new[]
-                {
-                    new AntonAwakeningRewardCandidate(
-                        1,
-                        new AntonAwakeningRewardDefinition(10157834, 1)),
-                });
+            var rewards = CreateRewardService(
+                dailyReset: null,
+                finalItemId: 3309,
+                quantity: 2);
             var sessions = new SessionDirectory();
             using (var capture = new ConnectedSession())
             {
@@ -258,14 +256,10 @@ namespace DfoServer.SelfTests
                     out var freeReservation);
                 run.Effects.TryCommit(freeReservation);
 
-                var daily = new AntonAwakeningDailyCardService(
+                var daily = CreateRewardService(
                     new DailyResetService(database),
-                    new[]
-                    {
-                        new AntonAwakeningRewardCandidate(
-                            1,
-                            new AntonAwakeningRewardDefinition(10157831, 0)),
-                    });
+                    finalItemId: 3309,
+                    quantity: 3);
                 var sessions = new SessionDirectory();
                 using (var capture = new ConnectedSession())
                 {
@@ -292,26 +286,31 @@ namespace DfoServer.SelfTests
                     coordinator.OnFreeCardCommittedAsync(capture.Session, run)
                         .GetAwaiter()
                         .GetResult();
-                    capture.ReadPackets(2);
+                    var projectionPackets = capture.ReadPackets(2);
                     Check(
                         "Anton inventory and daily claim remain absent before deadline",
-                        CountMainItem(lease, 10157831) == 0
-                        && !daily.HasClaimedRewardToday(characterId),
+                        projectionPackets.Count == 2
+                        && BitConverter.ToUInt32(projectionPackets[0], 26)
+                            == 3309
+                        && BitConverter.ToUInt32(projectionPackets[0], 30)
+                            == 3
+                        && CountMainItem(lease, 3309) == 0
+                        && !daily.HasClaimedRewardToday(characterId, 41, 247),
                         ref failures);
 
                     ClockService.Instance.CheckOnce(
                         DateTime.UtcNow.AddSeconds(1));
                     var grantDeadline = DateTime.UtcNow.AddSeconds(3);
-                    while (!daily.HasClaimedRewardToday(characterId)
+                    while (!daily.HasClaimedRewardToday(characterId, 41, 247)
                            && DateTime.UtcNow < grantDeadline)
                     {
                         Thread.Sleep(25);
                     }
-                    var grantedCount = CountMainItem(lease, 10157831);
+                    var grantedCount = CountMainItem(lease, 3309);
                     Check(
                         "Anton timer commits the frozen reward and daily claim once",
-                        daily.HasClaimedRewardToday(characterId)
-                        && grantedCount == 1
+                        daily.HasClaimedRewardToday(characterId, 41, 247)
+                        && grantedCount == 3
                         && instance.ParticipantEffects.GetState(
                             clearFact.SourceEventId,
                             DungeonParticipantEffectAudience.Instance,
@@ -327,7 +326,7 @@ namespace DfoServer.SelfTests
                     Thread.Sleep(100);
                     Check(
                         "committed Anton reward ignores duplicate free-card callbacks",
-                        CountMainItem(lease, 10157831) == grantedCount,
+                        CountMainItem(lease, 3309) == grantedCount,
                         ref failures);
                     run.Timers.Cancel(
                         DungeonRunTimerKeys.AntonAwakeningPostRevealGrant);
@@ -389,14 +388,10 @@ namespace DfoServer.SelfTests
                 out _);
             journal.TryCommit(clearReservation);
 
-            var rewards = new AntonAwakeningDailyCardService(
-                null,
-                new[]
-                {
-                    new AntonAwakeningRewardCandidate(
-                        1,
-                        new AntonAwakeningRewardDefinition(10157834, 1)),
-                });
+            var rewards = CreateRewardService(
+                dailyReset: null,
+                finalItemId: 3309,
+                quantity: 2);
             var sessions = new SessionDirectory();
             using (var capture = new ConnectedSession())
             {
@@ -544,20 +539,15 @@ namespace DfoServer.SelfTests
                     1,
                     partySlot: 0),
             };
-            var candidates = new[]
-            {
-                new AntonAwakeningRewardCandidate(
-                    1,
-                    new AntonAwakeningRewardDefinition(10157834, 1)),
-                new AntonAwakeningRewardCandidate(
-                    1,
-                    new AntonAwakeningRewardDefinition(10157833, 2)),
-            };
-            var rolls = new Queue<int>(new[] { 0, 1 });
+            var definition = BuildRewardDefinition(
+                "1 7001 1 1 7002 2");
+            var rolls = new Queue<int>(new[] { 0, 0, 1, 0 });
             var drawCalls = 0;
             var rewards = new AntonAwakeningDailyCardService(
                 null,
-                candidates,
+                groupItemId => groupItemId == 7001
+                    ? BuildUpgradableLegacy((10157834, 1, 2))
+                    : BuildUpgradableLegacy((10157833, 1, 4)),
                 maximum =>
                 {
                     drawCalls++;
@@ -571,15 +561,15 @@ namespace DfoServer.SelfTests
                 eventId,
                 roster,
                 rewards,
-                runA.Instance.SequentialDefinition,
-                runA.DungeonId,
+                definition,
+                247,
                 out var firstPlan);
             var second = runtime.TryGetOrCreatePlan(
                 eventId,
                 new[] { roster[0] },
                 rewards,
-                runA.Instance.SequentialDefinition,
-                runA.DungeonId,
+                definition,
+                247,
                 out var secondPlan);
             Check(
                 "same clear event reuses one immutable participant plan",
@@ -587,7 +577,7 @@ namespace DfoServer.SelfTests
                 && second
                 && ReferenceEquals(firstPlan, secondPlan)
                 && firstPlan.Entries.Count == 2
-                && drawCalls == 2,
+                && drawCalls == 4,
                 ref failures);
             Check(
                 "reward plan is ordered by frozen party slot",
@@ -598,8 +588,10 @@ namespace DfoServer.SelfTests
                 "reward plan preserves item and PVF state",
                 firstPlan?.Entries[0].Reward.ItemId == 10157834
                 && firstPlan.Entries[0].Reward.State == 1
+                && firstPlan.Entries[0].Reward.Quantity == 2
                 && firstPlan.Entries[1].Reward.ItemId == 10157833
-                && firstPlan.Entries[1].Reward.State == 2,
+                && firstPlan.Entries[1].Reward.State == 2
+                && firstPlan.Entries[1].Reward.Quantity == 4,
                 ref failures);
             Check(
                 "reward plan lookup returns the frozen event plan",
@@ -769,36 +761,73 @@ namespace DfoServer.SelfTests
                     inventory);
                 var daily = new AntonAwakeningDailyCardService(
                     new DailyResetService(database),
-                    Array.Empty<AntonAwakeningRewardCandidate>());
+                    _ => null,
+                    _ => 0);
                 var grants = new AntonAwakeningRewardGrantService(daily);
 
                 var failed = grants.TryGrant(
                     lease,
-                    new AntonAwakeningRewardDefinition(int.MaxValue, 2));
+                    new AntonAwakeningRewardDefinition(
+                        99,
+                        247,
+                        7001,
+                        int.MaxValue,
+                        2,
+                        2));
                 Check(
                     "failed inventory insertion rolls back daily claim",
                     failed.Outcome == AntonAwakeningRewardGrantOutcome.Failed
-                    && !daily.HasClaimedRewardToday(characterId),
+                    && !daily.HasClaimedRewardToday(characterId, 99, 247),
                     ref failures);
 
                 var granted = grants.TryGrant(
                     lease,
-                    new AntonAwakeningRewardDefinition(10157831, 0));
-                var countAfterGrant = CountMainItem(lease, 10157831);
+                    new AntonAwakeningRewardDefinition(
+                        99,
+                        247,
+                        7001,
+                        3309,
+                        3,
+                        0));
+                var countAfterGrant = CountMainItem(lease, 3309);
                 var duplicate = grants.TryGrant(
                     lease,
-                    new AntonAwakeningRewardDefinition(10157831, 0));
+                    new AntonAwakeningRewardDefinition(
+                        99,
+                        247,
+                        7001,
+                        3309,
+                        3,
+                        0));
+                var countAfterDuplicate = CountMainItem(lease, 3309);
+                var differentScope = grants.TryGrant(
+                    lease,
+                    new AntonAwakeningRewardDefinition(
+                        99,
+                        248,
+                        7002,
+                        3309,
+                        2,
+                        1));
                 Check(
                     "reward and daily claim commit in one transaction",
                     granted.Outcome == AntonAwakeningRewardGrantOutcome.Granted
-                    && daily.HasClaimedRewardToday(characterId)
-                    && countAfterGrant == 1,
+                    && daily.HasClaimedRewardToday(characterId, 99, 247)
+                    && countAfterGrant == 3
+                    && CountMainItem(lease, 7001) == 0,
                     ref failures);
                 Check(
                     "duplicate clear becomes committed no-reward",
                     duplicate.Outcome
                         == AntonAwakeningRewardGrantOutcome.AlreadyClaimed
-                    && CountMainItem(lease, 10157831) == countAfterGrant,
+                    && countAfterDuplicate == countAfterGrant,
+                    ref failures);
+                Check(
+                    "a different group/dungeon claim key remains independent",
+                    differentScope.Outcome
+                        == AntonAwakeningRewardGrantOutcome.Granted
+                    && daily.HasClaimedRewardToday(characterId, 99, 248)
+                    && CountMainItem(lease, 3309) == countAfterGrant + 2,
                     ref failures);
             }
             finally
@@ -808,6 +837,270 @@ namespace DfoServer.SelfTests
                 TryDelete(path + "-wal");
                 TryDelete(path + "-shm");
             }
+        }
+
+        private static void VerifyFourParticipantIndependentPlanning(
+            ref int failures)
+        {
+            var instance = new DungeonInstance(247, 0);
+            var roster = BuildRoster(instance, 4, characterIdBase: 64000);
+            var definition = BuildRewardDefinition(
+                "1 7001 0 1 7002 1");
+            var rolls = new Queue<int>(new[]
+            {
+                0, 0,
+                1, 0,
+                0, 1,
+                1, 1,
+            });
+            var rollCalls = 0;
+            var loadCalls = 0;
+            var rewards = new AntonAwakeningDailyCardService(
+                null,
+                groupItemId =>
+                {
+                    Interlocked.Increment(ref loadCalls);
+                    return groupItemId == 7001
+                        ? BuildUpgradableLegacy(
+                            (90001, 1, 1),
+                            (90002, 1, 2))
+                        : BuildUpgradableLegacy(
+                            (90003, 1, 3),
+                            (90004, 1, 4));
+                },
+                maximum =>
+                {
+                    Interlocked.Increment(ref rollCalls);
+                    lock (rolls)
+                        return rolls.Dequeue();
+                });
+            var runtime = new AntonAwakeningRewardRuntime();
+            var sourceEventId = Guid.NewGuid();
+            AntonAwakeningRewardPlan firstPlan = null;
+            AntonAwakeningRewardPlan secondPlan = null;
+
+            var first = System.Threading.Tasks.Task.Run(() =>
+                runtime.TryGetOrCreatePlan(
+                    sourceEventId,
+                    roster,
+                    rewards,
+                    definition,
+                    247,
+                    out firstPlan));
+            var second = System.Threading.Tasks.Task.Run(() =>
+                runtime.TryGetOrCreatePlan(
+                    sourceEventId,
+                    roster.Reverse().ToList().AsReadOnly(),
+                    rewards,
+                    definition,
+                    247,
+                    out secondPlan));
+            System.Threading.Tasks.Task.WaitAll(first, second);
+
+            Check(
+                "concurrent event planning publishes one immutable four-member plan",
+                first.Result
+                && second.Result
+                && ReferenceEquals(firstPlan, secondPlan)
+                && firstPlan.Entries.Count == 4
+                && loadCalls == 2
+                && rollCalls == 8
+                && rolls.Count == 0,
+                ref failures);
+            Check(
+                "four participants receive independent two-stage final rewards",
+                firstPlan != null
+                && firstPlan.Entries.Select(value => value.Reward.ItemId)
+                    .SequenceEqual(new[] { 90001, 90003, 90002, 90004 })
+                && firstPlan.Entries.Select(value => value.Reward.Quantity)
+                    .SequenceEqual(new[] { 1, 3, 2, 4 }),
+                ref failures);
+
+            var projected = AntonAwakeningRewardCoordinator
+                .BuildProjectedEntries(firstPlan);
+            Check(
+                "projection uses each frozen final item and quantity",
+                projected.Select(value => value.ItemId)
+                    .SequenceEqual(new uint[] { 90001, 90003, 90002, 90004 })
+                && projected.Select(value => value.Quantity)
+                    .SequenceEqual(new uint[] { 1, 3, 2, 4 })
+                && projected.All(value => value.ItemId != 7001
+                    && value.ItemId != 7002),
+                ref failures);
+        }
+
+        private static void VerifyParticipantFailureIsolation(ref int failures)
+        {
+            var instance = new DungeonInstance(247, 0);
+            var roster = BuildRoster(instance, 3, characterIdBase: 65000);
+            var definition = BuildRewardDefinition("1 7001 0");
+            var rolls = new Queue<int>(new[]
+            {
+                0, 0,
+                0, 1,
+                0, 0,
+            });
+            var rollCalls = 0;
+            var rewards = new AntonAwakeningDailyCardService(
+                null,
+                _ => BuildUpgradableLegacy((90001, 1, 2)),
+                maximum =>
+                {
+                    rollCalls++;
+                    var value = rolls.Dequeue();
+                    return value < maximum ? value : maximum;
+                });
+            var runtime = new AntonAwakeningRewardRuntime();
+            var sourceEventId = Guid.NewGuid();
+            var created = runtime.TryGetOrCreatePlan(
+                sourceEventId,
+                roster,
+                rewards,
+                definition,
+                247,
+                out var plan);
+            var replayed = runtime.TryGetOrCreatePlan(
+                sourceEventId,
+                roster,
+                rewards,
+                definition,
+                247,
+                out var replayedPlan);
+            Check(
+                "one participant draw failure does not discard successful peers",
+                created
+                && replayed
+                && ReferenceEquals(plan, replayedPlan)
+                && plan.Entries.Count == 2
+                && plan.Entries.Select(value => value.Participant.CharacterId)
+                    .SequenceEqual(new[] { 65000, 65002 })
+                && rollCalls == 6,
+                ref failures);
+            Check(
+                "failed participant terminal result is frozen for the event",
+                runtime.TryGetParticipantResolution(
+                    sourceEventId,
+                    roster[1].RunIdentity.ParticipantIdentity,
+                    out var failedResolution)
+                && !failedResolution.Succeeded
+                && failedResolution.Failure.RewardGroupItemId == 7001
+                && failedResolution.Failure.CardState == 0,
+                ref failures);
+
+            var allFailedRollCalls = 0;
+            var allFailedRewards = new AntonAwakeningDailyCardService(
+                null,
+                _ => BuildUpgradableLegacy((90001, 1, 2)),
+                maximum =>
+                {
+                    allFailedRollCalls++;
+                    return maximum;
+                });
+            var allFailedRuntime = new AntonAwakeningRewardRuntime();
+            var allFailedEventId = Guid.NewGuid();
+            var allFailed = allFailedRuntime.TryGetOrCreatePlan(
+                allFailedEventId,
+                roster,
+                allFailedRewards,
+                definition,
+                247,
+                out _);
+            var allFailedReplay = allFailedRuntime.TryGetOrCreatePlan(
+                allFailedEventId,
+                roster,
+                allFailedRewards,
+                definition,
+                247,
+                out _);
+            Check(
+                "all-failed planning attempt is terminal and never rerolls",
+                !allFailed
+                && !allFailedReplay
+                && allFailedRollCalls == roster.Count
+                && roster.All(participant =>
+                    allFailedRuntime.TryGetParticipantResolution(
+                        allFailedEventId,
+                        participant.RunIdentity.ParticipantIdentity,
+                        out var resolution)
+                    && !resolution.Succeeded),
+                ref failures);
+        }
+
+        private static IReadOnlyList<DungeonParticipantRosterEntry> BuildRoster(
+            DungeonInstance instance,
+            int count,
+            int characterIdBase)
+        {
+            var room = new DungeonRoomIdentity(instance.Identity, 1);
+            var roster = new List<DungeonParticipantRosterEntry>();
+            for (var index = 0; index < count; index++)
+            {
+                var run = new DungeonRun(
+                    instance,
+                    DungeonIdentityGenerator.NextRunId(),
+                    1,
+                    DungeonRunState.Active);
+                roster.Add(new DungeonParticipantRosterEntry(
+                    characterIdBase + index,
+                    (ushort)(500 + index),
+                    run,
+                    run.CaptureIdentity(),
+                    room,
+                    1,
+                    partySlot: (byte)index));
+            }
+            return roster.AsReadOnly();
+        }
+
+        private static AntonAwakeningDailyCardService CreateRewardService(
+            DailyResetService dailyReset,
+            int finalItemId,
+            int quantity)
+            => new AntonAwakeningDailyCardService(
+                dailyReset,
+                _ => BuildUpgradableLegacy((finalItemId, 1, quantity)),
+                _ => 0);
+
+        private static PvfLib.StackableItemFile BuildUpgradableLegacy(
+            params (int ItemId, int Weight, int Count)[] entries)
+        {
+            var stackable = new PvfLib.StackableItemFile
+            {
+                StackableType = "[upgradable legacy]",
+            };
+            foreach (var entry in entries)
+            {
+                stackable.UpgradableLegacyRewards.Add(
+                    new PvfLib.BoosterRewardEntry
+                    {
+                        RewardKind = "upgradable legacy",
+                        ItemId = entry.ItemId,
+                        Weight = entry.Weight,
+                        Count = entry.Count,
+                    });
+            }
+            return stackable;
+        }
+
+        private static DfoServer.GameWorld.SequentialDungeonDefinition
+            BuildRewardDefinition(string rewards)
+        {
+            var catalog = DfoServer.GameWorld
+                .SequentialDungeonDefinitionCatalog.Parse(
+                    "[sequential dungeon]\n99\n"
+                    + "[dungeon index check]\n247\n[/dungeon index check]\n"
+                    + "[rewardable dungeon index]\n247\n"
+                    + "[/rewardable dungeon index]\n"
+                    + "[clear reward item]\n"
+                    + rewards
+                    + "\n[/clear reward item]\n[/sequential dungeon]",
+                    _ => (byte)2);
+            if (!catalog.TryGetByGroupKey(99, out var definition))
+            {
+                throw new InvalidOperationException(
+                    "sequential reward fixture failed to parse");
+            }
+            return definition;
         }
 
         private static int CountMainItem(InventoryLease lease, int itemId)

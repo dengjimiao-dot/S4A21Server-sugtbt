@@ -10,8 +10,6 @@ using PvfLib;
 
 namespace DfoServer.Game.Dungeon
 {
-    // Immutable value frozen into an instance reward plan. The outer reward
-    // group is retained for diagnostics; ItemId/Quantity are always final.
     internal readonly struct AntonAwakeningRewardDefinition
     {
         internal AntonAwakeningRewardDefinition(
@@ -30,20 +28,12 @@ namespace DfoServer.Game.Dungeon
             CardState = cardState;
         }
 
-        // Compatibility only for pre-Task3 deterministic self-tests. The
-        // production path uses the Definition/STK overload below.
-        internal AntonAwakeningRewardDefinition(int itemId, int state)
-            : this(1, 1, itemId, itemId, 1, state)
-        {
-        }
-
         internal int GroupKey { get; }
         internal int RewardableDungeonId { get; }
         internal int RewardGroupItemId { get; }
         internal int ItemId { get; }
         internal int Quantity { get; }
         internal int CardState { get; }
-
         internal int State => CardState;
 
         internal bool IsValid => GroupKey > 0
@@ -54,39 +44,165 @@ namespace DfoServer.Game.Dungeon
             && CardState >= 0;
     }
 
-    // Legacy injected candidate retained for old deterministic self-tests.
-    // Server composition uses the stackable-loader constructor instead.
-    internal sealed class AntonAwakeningRewardCandidate
+    internal readonly struct AntonAwakeningRewardResolutionFailure
     {
-        internal AntonAwakeningRewardCandidate(
-            int weight,
+        internal AntonAwakeningRewardResolutionFailure(
+            int groupKey,
+            int rewardableDungeonId,
+            int rewardGroupItemId,
+            int finalItemId,
+            int cardState,
+            string reason)
+        {
+            GroupKey = groupKey;
+            RewardableDungeonId = rewardableDungeonId;
+            RewardGroupItemId = rewardGroupItemId;
+            FinalItemId = finalItemId;
+            CardState = cardState;
+            Reason = reason ?? "unknown";
+        }
+
+        internal int GroupKey { get; }
+        internal int RewardableDungeonId { get; }
+        internal int RewardGroupItemId { get; }
+        internal int FinalItemId { get; }
+        internal int CardState { get; }
+        internal string Reason { get; }
+    }
+
+    internal sealed class AntonAwakeningParticipantRewardResolution
+    {
+        private AntonAwakeningParticipantRewardResolution(
+            DungeonParticipantRosterEntry participant,
+            AntonAwakeningRewardDefinition reward,
+            AntonAwakeningRewardResolutionFailure failure,
+            bool succeeded)
+        {
+            Participant = participant
+                ?? throw new ArgumentNullException(nameof(participant));
+            Reward = reward;
+            Failure = failure;
+            Succeeded = succeeded;
+        }
+
+        internal DungeonParticipantRosterEntry Participant { get; }
+        internal AntonAwakeningRewardDefinition Reward { get; }
+        internal AntonAwakeningRewardResolutionFailure Failure { get; }
+        internal bool Succeeded { get; }
+
+        internal static AntonAwakeningParticipantRewardResolution Success(
+            DungeonParticipantRosterEntry participant,
             AntonAwakeningRewardDefinition reward)
+            => new AntonAwakeningParticipantRewardResolution(
+                participant,
+                reward,
+                default,
+                succeeded: true);
+
+        internal static AntonAwakeningParticipantRewardResolution Failed(
+            DungeonParticipantRosterEntry participant,
+            AntonAwakeningRewardResolutionFailure failure)
+            => new AntonAwakeningParticipantRewardResolution(
+                participant,
+                default,
+                failure,
+                succeeded: false);
+    }
+
+    internal sealed class AntonAwakeningRewardBatchResolution
+    {
+        internal AntonAwakeningRewardBatchResolution(
+            IReadOnlyList<AntonAwakeningParticipantRewardResolution>
+                participants)
+        {
+            Participants = Array.AsReadOnly((participants
+                ?? Array.Empty<AntonAwakeningParticipantRewardResolution>())
+                .ToArray());
+        }
+
+        internal IReadOnlyList<AntonAwakeningParticipantRewardResolution>
+            Participants { get; }
+    }
+
+    internal readonly struct AntonAwakeningPreparedRewardEntry
+    {
+        internal AntonAwakeningPreparedRewardEntry(
+            int itemId,
+            int weight,
+            int quantity)
+        {
+            ItemId = itemId;
+            Weight = weight;
+            Quantity = quantity;
+        }
+
+        internal int ItemId { get; }
+        internal int Weight { get; }
+        internal int Quantity { get; }
+    }
+
+    internal sealed class AntonAwakeningPreparedRewardGroup
+    {
+        internal AntonAwakeningPreparedRewardGroup(
+            int weight,
+            int rewardGroupItemId,
+            int cardState,
+            int totalInnerWeight,
+            IReadOnlyList<AntonAwakeningPreparedRewardEntry> entries)
         {
             Weight = weight;
-            Reward = reward;
+            RewardGroupItemId = rewardGroupItemId;
+            CardState = cardState;
+            TotalInnerWeight = totalInnerWeight;
+            Entries = Array.AsReadOnly((entries
+                ?? Array.Empty<AntonAwakeningPreparedRewardEntry>()).ToArray());
         }
 
         internal int Weight { get; }
-        internal AntonAwakeningRewardDefinition Reward { get; }
+        internal int RewardGroupItemId { get; }
+        internal int CardState { get; }
+        internal int TotalInnerWeight { get; }
+        internal IReadOnlyList<AntonAwakeningPreparedRewardEntry> Entries
+        {
+            get;
+        }
+    }
+
+    internal sealed class AntonAwakeningPreparedRewardPools
+    {
+        internal AntonAwakeningPreparedRewardPools(
+            int groupKey,
+            int rewardableDungeonId,
+            int totalOuterWeight,
+            IReadOnlyList<AntonAwakeningPreparedRewardGroup> groups)
+        {
+            GroupKey = groupKey;
+            RewardableDungeonId = rewardableDungeonId;
+            TotalOuterWeight = totalOuterWeight;
+            Groups = Array.AsReadOnly((groups
+                ?? Array.Empty<AntonAwakeningPreparedRewardGroup>()).ToArray());
+        }
+
+        internal int GroupKey { get; }
+        internal int RewardableDungeonId { get; }
+        internal int TotalOuterWeight { get; }
+        internal IReadOnlyList<AntonAwakeningPreparedRewardGroup> Groups
+        {
+            get;
+        }
     }
 
     /// <summary>
-    /// Resolves special rewards from the immutable sequential ETC definition
-    /// and the existing PvfLib stackable parser. It also owns the dynamic
-    /// daily claim key, while durable state remains in DailyResetService.
+    /// Prepares all configured STK pools before random selection and owns the
+    /// dynamic daily claim key. Durable state remains in DailyResetService.
     /// </summary>
     internal sealed class AntonAwakeningDailyCardService
     {
         private const string RewardPath = "etc/sequential_dungeon_info.etc";
-        private const int LegacyGroupKey = 1;
-        private const int LegacyRewardableDungeonId = 1;
 
         private readonly DailyResetService _dailyReset;
         private readonly Func<int, StackableItemFile> _stackableLoader;
         private readonly Func<int, int> _nextRoll;
-        private readonly IReadOnlyList<AntonAwakeningRewardCandidate>
-            _legacyCandidates;
-        private readonly int _legacyTotalWeight;
 
         internal AntonAwakeningDailyCardService(DailyResetService dailyReset)
             : this(dailyReset, StackableItemProvider.Load, null)
@@ -99,267 +215,402 @@ namespace DfoServer.Game.Dungeon
             Func<int, int> nextRoll = null)
         {
             _dailyReset = dailyReset;
-            _stackableLoader = stackableLoader ?? StackableItemProvider.Load;
+            _stackableLoader = stackableLoader
+                ?? throw new ArgumentNullException(nameof(stackableLoader));
             _nextRoll = nextRoll ?? ServerRandom.Next;
-            _legacyCandidates = Array.Empty<AntonAwakeningRewardCandidate>();
-            _legacyTotalWeight = 0;
         }
 
-        // Compatibility overload for existing deterministic self-tests.
-        internal AntonAwakeningDailyCardService(
-            DailyResetService dailyReset,
-            IReadOnlyList<AntonAwakeningRewardCandidate> candidates,
-            Func<int, int> nextRoll = null)
-        {
-            _dailyReset = dailyReset;
-            _stackableLoader = StackableItemProvider.Load;
-            _nextRoll = nextRoll ?? ServerRandom.Next;
-            _legacyCandidates = candidates ??
-                Array.Empty<AntonAwakeningRewardCandidate>();
-
-            var total = 0L;
-            foreach (var candidate in _legacyCandidates)
-            {
-                if (candidate == null
-                    || candidate.Weight <= 0
-                    || !candidate.Reward.IsValid)
-                {
-                    total = 0;
-                    _legacyCandidates =
-                        Array.Empty<AntonAwakeningRewardCandidate>();
-                    break;
-                }
-
-                total += candidate.Weight;
-                if (total > int.MaxValue)
-                {
-                    total = 0;
-                    _legacyCandidates =
-                        Array.Empty<AntonAwakeningRewardCandidate>();
-                    break;
-                }
-            }
-            _legacyTotalWeight = (int)total;
-        }
-
-        internal bool IsConfigured => _legacyTotalWeight > 0
-            || _stackableLoader != null;
-
-        // Two-stage draw: clear reward item -> STK upgradable legacy entry.
-        internal bool TryDrawReward(
+        // Validates and copies every outer group's STK pool before any random
+        // call. The value-only graph cannot be changed through PvfLib caches.
+        internal bool TryPrepareRewardPools(
             SequentialDungeonDefinition definition,
             int rewardableDungeonId,
-            out AntonAwakeningRewardDefinition reward)
+            out AntonAwakeningPreparedRewardPools prepared,
+            out AntonAwakeningRewardResolutionFailure failure)
         {
-            reward = default;
-            // Keep old deterministic self-tests isolated from production
-            // resolution. The server composition never supplies candidates;
-            // when it does, the injected result is already a frozen final
-            // reward and no PVF group id is reinterpreted here.
-            if (_legacyTotalWeight > 0)
-                return TryDrawReward(out reward);
-
+            prepared = null;
+            failure = default;
+            var groupKey = definition?.GroupKey ?? 0;
             if (definition == null
                 || rewardableDungeonId <= 0
                 || !definition.RewardableDungeonIds.Contains(
                     rewardableDungeonId))
             {
-                LogFailure(
-                    definition,
+                failure = NewFailure(
+                    groupKey,
                     rewardableDungeonId,
-                    0,
-                    0,
-                    "definition missing or dungeon is not rewardable");
+                    reason: "definition missing or dungeon is not rewardable");
                 return false;
             }
 
             var outer = definition.ClearRewardGroups;
             if (outer == null || outer.Count == 0)
             {
-                LogFailure(
-                    definition,
+                failure = NewFailure(
+                    groupKey,
                     rewardableDungeonId,
-                    0,
-                    0,
-                    "clear reward group is empty");
+                    reason: "clear reward group is empty");
                 return false;
             }
 
-            if (!TrySelectOuter(
-                    outer,
-                    out var selectedGroup,
-                    out _))
+            var preparedGroups = new List<AntonAwakeningPreparedRewardGroup>(
+                outer.Count);
+            var totalOuterWeight = 0L;
+            foreach (var group in outer)
             {
-                LogFailure(
-                    definition,
-                    rewardableDungeonId,
-                    0,
-                    0,
-                    "clear reward group contains invalid weight or roll");
-                return false;
-            }
-
-            StackableItemFile stackable;
-            try
-            {
-                stackable = _stackableLoader?.Invoke(
-                    selectedGroup.RewardGroupItemId);
-            }
-            catch (Exception ex)
-            {
-                LogFailure(
-                    definition,
-                    rewardableDungeonId,
-                    selectedGroup.RewardGroupItemId,
-                    0,
-                    "stackable loader threw: " + ex.Message,
-                    selectedGroup.CardState);
-                return false;
-            }
-
-            if (stackable == null)
-            {
-                LogFailure(
-                    definition,
-                    rewardableDungeonId,
-                    selectedGroup.RewardGroupItemId,
-                    0,
-                    "stackable item is missing",
-                    selectedGroup.CardState);
-                return false;
-            }
-
-            var stackableType = StackableItemProvider.NormalizeType(
-                stackable.StackableType);
-            if (!string.Equals(
-                    stackableType,
-                    StackableItemProvider.UpgradableLegacyType,
-                    StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(
-                    stackableType,
-                    StackableItemProvider.RandomUpgradableLegacyType,
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                LogFailure(
-                    definition,
-                    rewardableDungeonId,
-                    selectedGroup.RewardGroupItemId,
-                    0,
-                    "stackable type is not upgradable legacy",
-                    selectedGroup.CardState);
-                return false;
-            }
-
-            var inner = stackable.UpgradableLegacyRewards;
-            if (inner == null || inner.Count == 0)
-            {
-                LogFailure(
-                    definition,
-                    rewardableDungeonId,
-                    selectedGroup.RewardGroupItemId,
-                    0,
-                    "upgradable legacy rewards are empty",
-                    selectedGroup.CardState);
-                return false;
-            }
-
-            var totalInnerWeight = 0L;
-            foreach (var candidate in inner)
-            {
-                if (candidate == null
-                    || candidate.ItemId <= 0
-                    || candidate.Weight <= 0
-                    || candidate.Count <= 0)
+                if (group == null
+                    || group.Weight <= 0
+                    || group.RewardGroupItemId <= 0
+                    || group.CardState < 0)
                 {
-                    LogFailure(
-                        definition,
+                    failure = NewFailure(
+                        groupKey,
                         rewardableDungeonId,
-                        selectedGroup.RewardGroupItemId,
-                        candidate?.ItemId ?? 0,
-                        "upgradable legacy entry is invalid",
-                        selectedGroup.CardState);
+                        group?.RewardGroupItemId ?? 0,
+                        group?.CardState ?? -1,
+                        reason: "clear reward group contains invalid data");
                     return false;
                 }
 
-                totalInnerWeight += candidate.Weight;
-                if (totalInnerWeight > int.MaxValue)
+                totalOuterWeight += group.Weight;
+                if (totalOuterWeight > int.MaxValue)
                 {
-                    LogFailure(
-                        definition,
+                    failure = NewFailure(
+                        groupKey,
                         rewardableDungeonId,
-                        selectedGroup.RewardGroupItemId,
-                        candidate.ItemId,
-                        "upgradable legacy weight exceeds Int32 capacity",
-                        selectedGroup.CardState);
+                        group.RewardGroupItemId,
+                        group.CardState,
+                        reason: "clear reward weight exceeds Int32 capacity");
                     return false;
                 }
+
+                StackableItemFile stackable;
+                try
+                {
+                    stackable = _stackableLoader(group.RewardGroupItemId);
+                }
+                catch (Exception ex)
+                {
+                    failure = NewFailure(
+                        groupKey,
+                        rewardableDungeonId,
+                        group.RewardGroupItemId,
+                        group.CardState,
+                        reason: "stackable loader threw "
+                            + ex.GetType().Name);
+                    return false;
+                }
+
+                if (stackable == null)
+                {
+                    failure = NewFailure(
+                        groupKey,
+                        rewardableDungeonId,
+                        group.RewardGroupItemId,
+                        group.CardState,
+                        reason: "stackable item is missing");
+                    return false;
+                }
+
+                var stackableType = StackableItemProvider.NormalizeType(
+                    stackable.StackableType);
+                if (!string.Equals(
+                        stackableType,
+                        StackableItemProvider.UpgradableLegacyType,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    failure = NewFailure(
+                        groupKey,
+                        rewardableDungeonId,
+                        group.RewardGroupItemId,
+                        group.CardState,
+                        reason: "stackable type is not upgradable legacy");
+                    return false;
+                }
+
+                var inner = stackable.UpgradableLegacyRewards;
+                if (inner == null || inner.Count == 0)
+                {
+                    failure = NewFailure(
+                        groupKey,
+                        rewardableDungeonId,
+                        group.RewardGroupItemId,
+                        group.CardState,
+                        reason: "upgradable legacy rewards are empty");
+                    return false;
+                }
+
+                var preparedEntries =
+                    new List<AntonAwakeningPreparedRewardEntry>(inner.Count);
+                var totalInnerWeight = 0L;
+                foreach (var candidate in inner)
+                {
+                    if (candidate == null
+                        || candidate.ItemId <= 0
+                        || candidate.Weight <= 0
+                        || candidate.Count <= 0)
+                    {
+                        failure = NewFailure(
+                            groupKey,
+                            rewardableDungeonId,
+                            group.RewardGroupItemId,
+                            group.CardState,
+                            candidate?.ItemId ?? 0,
+                            reason: "upgradable legacy entry is invalid");
+                        return false;
+                    }
+
+                    totalInnerWeight += candidate.Weight;
+                    if (totalInnerWeight > int.MaxValue)
+                    {
+                        failure = NewFailure(
+                            groupKey,
+                            rewardableDungeonId,
+                            group.RewardGroupItemId,
+                            group.CardState,
+                            candidate.ItemId,
+                            reason: "upgradable legacy weight exceeds Int32 capacity");
+                        return false;
+                    }
+
+                    preparedEntries.Add(
+                        new AntonAwakeningPreparedRewardEntry(
+                            candidate.ItemId,
+                            candidate.Weight,
+                            candidate.Count));
+                }
+
+                preparedGroups.Add(
+                    new AntonAwakeningPreparedRewardGroup(
+                        group.Weight,
+                        group.RewardGroupItemId,
+                        group.CardState,
+                        (int)totalInnerWeight,
+                        preparedEntries.AsReadOnly()));
             }
 
-            if (!TryRoll((int)totalInnerWeight, out var innerRoll))
+            prepared = new AntonAwakeningPreparedRewardPools(
+                groupKey,
+                rewardableDungeonId,
+                (int)totalOuterWeight,
+                preparedGroups.AsReadOnly());
+            return true;
+        }
+
+        // One event planning attempt. Every participant gets a terminal result;
+        // each success consumes exactly one outer and one inner roll.
+        internal AntonAwakeningRewardBatchResolution ResolveParticipantRewards(
+            Guid sourceEventId,
+            IReadOnlyList<DungeonParticipantRosterEntry> roster,
+            SequentialDungeonDefinition definition,
+            int rewardableDungeonId)
+        {
+            var participants = (roster
+                    ?? Array.Empty<DungeonParticipantRosterEntry>())
+                .Where(value => value != null)
+                .OrderBy(value => value.PartySlot)
+                .ThenBy(value => value.ParticipantUserId)
+                .ThenBy(value => value.CharacterId)
+                .ToList();
+            if (participants.Count == 0)
             {
-                LogFailure(
+                return new AntonAwakeningRewardBatchResolution(
+                    Array.Empty<AntonAwakeningParticipantRewardResolution>());
+            }
+
+            var identities = new HashSet<DungeonParticipantRunIdentity>();
+            var userIds = new HashSet<ushort>();
+            var rosterIsValid = sourceEventId != Guid.Empty;
+            foreach (var participant in participants)
+            {
+                rosterIsValid = rosterIsValid
+                    && participant.RunIdentity.ParticipantIdentity.IsValid
+                    && participant.CharacterId > 0
+                    && participant.ParticipantUserId > 0
+                    && userIds.Add(participant.ParticipantUserId)
+                    && identities.Add(
+                        participant.RunIdentity.ParticipantIdentity);
+            }
+
+            if (!rosterIsValid)
+            {
+                return FailAll(
+                    sourceEventId,
+                    participants,
+                    NewFailure(
+                        definition?.GroupKey ?? 0,
+                        rewardableDungeonId,
+                        reason: "source event or participant roster is invalid"));
+            }
+
+            if (!TryPrepareRewardPools(
                     definition,
                     rewardableDungeonId,
-                    selectedGroup.RewardGroupItemId,
-                    0,
-                    "upgradable legacy roll is invalid",
-                    selectedGroup.CardState);
+                    out var prepared,
+                    out var preparationFailure))
+            {
+                return FailAll(
+                    sourceEventId,
+                    participants,
+                    preparationFailure);
+            }
+
+            var results =
+                new List<AntonAwakeningParticipantRewardResolution>(
+                    participants.Count);
+            foreach (var participant in participants)
+            {
+                if (TryDrawPreparedReward(
+                        prepared,
+                        out var reward,
+                        out var drawFailure))
+                {
+                    results.Add(
+                        AntonAwakeningParticipantRewardResolution.Success(
+                            participant,
+                            reward));
+                    continue;
+                }
+
+                LogFailure(
+                    participant.CharacterId,
+                    sourceEventId,
+                    drawFailure);
+                results.Add(
+                    AntonAwakeningParticipantRewardResolution.Failed(
+                        participant,
+                        drawFailure));
+            }
+
+            return new AntonAwakeningRewardBatchResolution(
+                results.AsReadOnly());
+        }
+
+        internal AntonAwakeningRewardBatchResolution FreezeUnexpectedFailure(
+            Guid sourceEventId,
+            IReadOnlyList<DungeonParticipantRosterEntry> roster,
+            SequentialDungeonDefinition definition,
+            int rewardableDungeonId,
+            string reason)
+        {
+            var participants = (roster
+                    ?? Array.Empty<DungeonParticipantRosterEntry>())
+                .Where(value => value != null)
+                .OrderBy(value => value.PartySlot)
+                .ThenBy(value => value.ParticipantUserId)
+                .ThenBy(value => value.CharacterId)
+                .ToList()
+                .AsReadOnly();
+            return FailAll(
+                sourceEventId,
+                participants,
+                NewFailure(
+                    definition?.GroupKey ?? 0,
+                    rewardableDungeonId,
+                    reason: reason));
+        }
+
+        internal bool TryDrawPreparedReward(
+            AntonAwakeningPreparedRewardPools prepared,
+            out AntonAwakeningRewardDefinition reward,
+            out AntonAwakeningRewardResolutionFailure failure)
+        {
+            reward = default;
+            failure = default;
+            if (prepared == null
+                || prepared.Groups.Count == 0
+                || prepared.TotalOuterWeight <= 0)
+            {
+                failure = NewFailure(
+                    prepared?.GroupKey ?? 0,
+                    prepared?.RewardableDungeonId ?? 0,
+                    reason: "prepared reward pools are invalid");
                 return false;
             }
 
-            PvfLib.BoosterRewardEntry selectedInner = null;
-            var remaining = innerRoll;
-            foreach (var candidate in inner)
+            if (!TryRoll(prepared.TotalOuterWeight, out var outerRoll))
             {
-                if (remaining < candidate.Weight)
+                failure = NewFailure(
+                    prepared.GroupKey,
+                    prepared.RewardableDungeonId,
+                    reason: "outer reward roll is invalid");
+                return false;
+            }
+
+            AntonAwakeningPreparedRewardGroup selectedGroup = null;
+            var remainingOuter = outerRoll;
+            foreach (var group in prepared.Groups)
+            {
+                if (remainingOuter < group.Weight)
                 {
-                    selectedInner = candidate;
+                    selectedGroup = group;
                     break;
                 }
-                remaining -= candidate.Weight;
+                remainingOuter -= group.Weight;
             }
 
-            if (selectedInner == null)
+            if (selectedGroup == null)
             {
-                LogFailure(
-                    definition,
-                    rewardableDungeonId,
+                failure = NewFailure(
+                    prepared.GroupKey,
+                    prepared.RewardableDungeonId,
+                    reason: "outer reward roll selected no group");
+                return false;
+            }
+
+            if (!TryRoll(selectedGroup.TotalInnerWeight, out var innerRoll))
+            {
+                failure = NewFailure(
+                    prepared.GroupKey,
+                    prepared.RewardableDungeonId,
                     selectedGroup.RewardGroupItemId,
-                    0,
-                    "upgradable legacy roll did not select an entry",
-                    selectedGroup.CardState);
+                    selectedGroup.CardState,
+                    reason: "inner reward roll is invalid");
+                return false;
+            }
+
+            var selectedEntry = default(AntonAwakeningPreparedRewardEntry);
+            var selected = false;
+            var remainingInner = innerRoll;
+            foreach (var entry in selectedGroup.Entries)
+            {
+                if (remainingInner < entry.Weight)
+                {
+                    selectedEntry = entry;
+                    selected = true;
+                    break;
+                }
+                remainingInner -= entry.Weight;
+            }
+
+            if (!selected)
+            {
+                failure = NewFailure(
+                    prepared.GroupKey,
+                    prepared.RewardableDungeonId,
+                    selectedGroup.RewardGroupItemId,
+                    selectedGroup.CardState,
+                    reason: "inner reward roll selected no item");
                 return false;
             }
 
             reward = new AntonAwakeningRewardDefinition(
-                definition.GroupKey,
-                rewardableDungeonId,
+                prepared.GroupKey,
+                prepared.RewardableDungeonId,
                 selectedGroup.RewardGroupItemId,
-                selectedInner.ItemId,
-                selectedInner.Count,
+                selectedEntry.ItemId,
+                selectedEntry.Quantity,
                 selectedGroup.CardState);
-            return reward.IsValid;
-        }
+            if (reward.IsValid)
+                return true;
 
-        // Compatibility draw for pre-Task3 tests.
-        internal bool TryDrawReward(out AntonAwakeningRewardDefinition reward)
-        {
-            reward = default;
-            if (_legacyTotalWeight <= 0
-                || !TryRoll(_legacyTotalWeight, out var roll))
-            {
-                return false;
-            }
-
-            foreach (var candidate in _legacyCandidates)
-            {
-                if (roll < candidate.Weight)
-                {
-                    reward = candidate.Reward;
-                    return reward.IsValid;
-                }
-                roll -= candidate.Weight;
-            }
+            failure = NewFailure(
+                prepared.GroupKey,
+                prepared.RewardableDungeonId,
+                selectedGroup.RewardGroupItemId,
+                selectedGroup.CardState,
+                selectedEntry.ItemId,
+                reason: "resolved reward is invalid");
             return false;
         }
 
@@ -375,29 +626,21 @@ namespace DfoServer.Game.Dungeon
                 && _dailyReset.IsClaimed(characterId, key);
         }
 
-        internal bool HasClaimedRewardToday(int characterId)
-            => HasClaimedRewardToday(
-                characterId,
-                LegacyGroupKey,
-                LegacyRewardableDungeonId);
-
         internal bool TryClaimReward(
             int characterId,
             int groupKey,
             int rewardableDungeonId)
-            => _dailyReset != null
+        {
+            var key = BuildRewardCounterKey(groupKey, rewardableDungeonId);
+            return _dailyReset != null
                 && characterId > 0
+                && key.Length > 0
                 && _dailyReset.TryIncrementCounter(
                     characterId,
-                    BuildRewardCounterKey(groupKey, rewardableDungeonId),
+                    key,
                     cap: 1,
                     period: DailyResetService.PeriodDay);
-
-        internal bool TryClaimReward(int characterId)
-            => TryClaimReward(
-                characterId,
-                LegacyGroupKey,
-                LegacyRewardableDungeonId);
+        }
 
         internal bool TryClaimReward(
             SqliteConnection connection,
@@ -405,28 +648,21 @@ namespace DfoServer.Game.Dungeon
             int characterId,
             int groupKey,
             int rewardableDungeonId)
-            => _dailyReset != null
+        {
+            var key = BuildRewardCounterKey(groupKey, rewardableDungeonId);
+            return _dailyReset != null
                 && connection != null
                 && transaction != null
                 && characterId > 0
+                && key.Length > 0
                 && _dailyReset.TryIncrementCounter(
                     connection,
                     transaction,
                     characterId,
-                    BuildRewardCounterKey(groupKey, rewardableDungeonId),
+                    key,
                     cap: 1,
                     period: DailyResetService.PeriodDay);
-
-        internal bool TryClaimReward(
-            SqliteConnection connection,
-            SqliteTransaction transaction,
-            int characterId)
-            => TryClaimReward(
-                connection,
-                transaction,
-                characterId,
-                LegacyGroupKey,
-                LegacyRewardableDungeonId);
+        }
 
         internal static string BuildRewardCounterKey(
             int groupKey,
@@ -437,44 +673,6 @@ namespace DfoServer.Game.Dungeon
                     + ":"
                     + rewardableDungeonId
                 : string.Empty;
-
-        private bool TrySelectOuter(
-            IReadOnlyList<SequentialDungeonRewardGroup> groups,
-            out SequentialDungeonRewardGroup selected,
-            out int roll)
-        {
-            selected = null;
-            roll = 0;
-            var total = 0L;
-            foreach (var group in groups)
-            {
-                if (group == null
-                    || group.Weight <= 0
-                    || group.RewardGroupItemId <= 0
-                    || group.CardState < 0)
-                {
-                    return false;
-                }
-                total += group.Weight;
-                if (total > int.MaxValue)
-                    return false;
-            }
-
-            if (total <= 0 || !TryRoll((int)total, out roll))
-                return false;
-
-            var remaining = roll;
-            foreach (var group in groups)
-            {
-                if (remaining < group.Weight)
-                {
-                    selected = group;
-                    break;
-                }
-                remaining -= group.Weight;
-            }
-            return selected != null;
-        }
 
         private bool TryRoll(int maximum, out int roll)
         {
@@ -492,23 +690,60 @@ namespace DfoServer.Game.Dungeon
             }
         }
 
-        private static void LogFailure(
-            SequentialDungeonDefinition definition,
+        private static AntonAwakeningRewardBatchResolution FailAll(
+            Guid sourceEventId,
+            IReadOnlyList<DungeonParticipantRosterEntry> participants,
+            AntonAwakeningRewardResolutionFailure failure)
+        {
+            var results =
+                new List<AntonAwakeningParticipantRewardResolution>(
+                    participants.Count);
+            foreach (var participant in participants)
+            {
+                LogFailure(
+                    participant.CharacterId,
+                    sourceEventId,
+                    failure);
+                results.Add(
+                    AntonAwakeningParticipantRewardResolution.Failed(
+                        participant,
+                        failure));
+            }
+            return new AntonAwakeningRewardBatchResolution(
+                results.AsReadOnly());
+        }
+
+        private static AntonAwakeningRewardResolutionFailure NewFailure(
+            int groupKey,
             int rewardableDungeonId,
-            int rewardGroupItemId,
-            int finalItemId,
-            string reason,
-            int cardState = 0)
+            int rewardGroupItemId = 0,
+            int cardState = -1,
+            int finalItemId = 0,
+            string reason = null)
+            => new AntonAwakeningRewardResolutionFailure(
+                groupKey,
+                rewardableDungeonId,
+                rewardGroupItemId,
+                finalItemId,
+                cardState,
+                reason);
+
+        private static void LogFailure(
+            int characterId,
+            Guid sourceEventId,
+            AntonAwakeningRewardResolutionFailure failure)
         {
             FileLogger.Log(
                 "[AntonAwakeningDailyCardService] reward resolution failed: "
                 + $"path={RewardPath} "
-                + $"group={definition?.GroupKey ?? 0} "
-                + $"rewardableDungeon={rewardableDungeonId} "
-                + $"rewardGroup={rewardGroupItemId} "
-                + $"card={cardState} "
-                + $"finalItem={finalItemId} "
-                + $"reason={reason}");
+                + $"characterId={characterId} "
+                + $"sourceEventId={sourceEventId:N} "
+                + $"group={failure.GroupKey} "
+                + $"rewardableDungeon={failure.RewardableDungeonId} "
+                + $"card={failure.CardState} "
+                + $"rewardGroup={failure.RewardGroupItemId} "
+                + $"final={failure.FinalItemId} "
+                + $"reason={failure.Reason}");
         }
     }
 }
