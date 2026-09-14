@@ -361,8 +361,8 @@ repository、random source、journal、timer registry 或 inventory transaction 
 
 涉及 Dungeon、Settlement、共享 Inventory、SQLite 和 PVF 的测试显式设置当前
 `PVF_ARCHIVE_PATH` 并严格串行执行。聚焦 SelfTest 通过后运行
-`--selftest-all`，再按解决方案 `Release|x86`（项目 Win32 映射）执行 Rebuild，
-要求 0 warning、0 error。最后运行 `git diff --check`、检查工作区和暂存文件，
+`--selftest-all`，再按当前服务端解决方案实际定义的 `Release|Any CPU` 执行
+Rebuild，要求 0 warning、0 error。最后运行 `git diff --check`、检查工作区和暂存文件，
 确保 PVF、数据库、日志、抓包、密钥及 `bin/obj/publish` 未进入变更。
 
 ## 实机验证边界
