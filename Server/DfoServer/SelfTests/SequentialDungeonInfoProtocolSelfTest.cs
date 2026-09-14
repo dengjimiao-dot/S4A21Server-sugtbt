@@ -1,6 +1,7 @@
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.SelectCharacter;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
 using DfoServer.Network.Builders;
@@ -162,6 +163,7 @@ namespace DfoServer.SelfTests
                         new AntonAwakeningDailyProgressRepository(
                             database,
                             dailyReset),
+                        SequentialDungeonDefinitionCatalog.Current,
                         () => anchoredNow);
                 AntonNormalClearApplicationResult awakeningResult = null;
                 foreach (var dungeonId in new[] { 243, 244, 245, 246 })

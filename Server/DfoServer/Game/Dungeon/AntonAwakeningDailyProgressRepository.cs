@@ -1,5 +1,6 @@
 using DfoServer.Game.DailyReset;
 using DfoServer.Game.SelectCharacter;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
 using System;
@@ -9,9 +10,6 @@ namespace DfoServer.Game.Dungeon
 {
     internal sealed class AntonAwakeningDailyProgressRepository
     {
-        internal const string MarkerKey =
-            "anton_awakening_progress_initialized";
-
         private readonly IGameDatabase _database;
         private readonly DailyResetService _dailyReset;
 
@@ -26,9 +24,13 @@ namespace DfoServer.Game.Dungeon
         }
 
         internal List<DungeonPermissionEntrySnapshot>
-            EnsureCurrentDayAndLoad(int characterId, DateTime utcNow)
+            EnsureCurrentDayAndLoad(
+                int characterId,
+                SequentialDungeonDefinition definition,
+                DateTime utcNow)
         {
             ValidateCharacterId(characterId);
+            ValidateDefinition(definition);
             using (var connection = _database.OpenConnection())
             using (var transaction = connection.BeginTransaction(deferred: false))
             {
@@ -36,11 +38,13 @@ namespace DfoServer.Game.Dungeon
                     connection,
                     transaction,
                     characterId,
+                    definition,
                     utcNow);
                 var snapshot = Load(
                     connection,
                     transaction,
-                    characterId);
+                    characterId,
+                    definition);
                 transaction.Commit();
                 return snapshot;
             }
@@ -48,12 +52,14 @@ namespace DfoServer.Game.Dungeon
 
         internal List<DungeonPermissionEntrySnapshot> RecordClearAndLoad(
             int characterId,
+            SequentialDungeonDefinition definition,
             IReadOnlyCollection<DungeonPermissionEntrySnapshot> updates,
             DateTime utcNow,
             out List<DungeonPermissionEntrySnapshot> changes)
         {
             ValidateCharacterId(characterId);
-            var normalized = NormalizeUpdates(updates);
+            ValidateDefinition(definition);
+            var normalized = NormalizeUpdates(definition, updates);
             using (var connection = _database.OpenConnection())
             using (var transaction = connection.BeginTransaction(deferred: false))
             {
@@ -61,6 +67,7 @@ namespace DfoServer.Game.Dungeon
                     connection,
                     transaction,
                     characterId,
+                    definition,
                     utcNow);
                 changes = new List<DungeonPermissionEntrySnapshot>();
                 foreach (var update in normalized)
@@ -85,7 +92,8 @@ namespace DfoServer.Game.Dungeon
                 var snapshot = Load(
                     connection,
                     transaction,
-                    characterId);
+                    characterId,
+                    definition);
                 transaction.Commit();
                 return snapshot;
             }
@@ -95,13 +103,15 @@ namespace DfoServer.Game.Dungeon
             SqliteConnection connection,
             SqliteTransaction transaction,
             int characterId,
+            SequentialDungeonDefinition definition,
             DateTime utcNow)
         {
+            var markerKey = BuildMarkerKey(definition.GroupKey);
             var marker = _dailyReset.GetCounter(
                 connection,
                 transaction,
                 characterId,
-                MarkerKey,
+                markerKey,
                 DailyResetService.PeriodDay,
                 utcNow);
             if (marker == 1)
@@ -115,10 +125,13 @@ namespace DfoServer.Game.Dungeon
             using (var command = connection.CreateCommand())
             {
                 command.Transaction = transaction;
-                command.CommandText = @"
+                var dungeonParameters = AddDungeonParameters(
+                    command,
+                    definition.DungeonIds);
+                command.CommandText = $@"
 DELETE FROM character_dungeon_permissions
 WHERE character_id = @cid
-  AND dungeon_id IN (243, 244, 245, 246, 247);";
+  AND dungeon_id IN ({dungeonParameters});";
                 command.Parameters.AddWithValue("@cid", characterId);
                 command.ExecuteNonQuery();
             }
@@ -127,14 +140,14 @@ WHERE character_id = @cid
                     connection,
                     transaction,
                     characterId,
-                    MarkerKey,
+                    markerKey,
                     DailyResetService.PeriodDay,
                     utcNow)
                 || _dailyReset.GetCounter(
                     connection,
                     transaction,
                     characterId,
-                    MarkerKey,
+                    markerKey,
                     DailyResetService.PeriodDay,
                     utcNow) != 1)
             {
@@ -144,6 +157,7 @@ WHERE character_id = @cid
         }
 
         private static List<DungeonPermissionEntrySnapshot> NormalizeUpdates(
+            SequentialDungeonDefinition definition,
             IReadOnlyCollection<DungeonPermissionEntrySnapshot> updates)
         {
             if (updates == null)
@@ -151,15 +165,16 @@ WHERE character_id = @cid
 
             var result = new List<DungeonPermissionEntrySnapshot>();
             var indexes = new Dictionary<ushort, int>();
+            var configuredDungeonIds = new HashSet<int>(
+                definition.DungeonIds);
             foreach (var update in updates)
             {
                 if (update == null
-                    || update.DungeonId < 243
-                    || update.DungeonId > 247
+                    || !configuredDungeonIds.Contains(update.DungeonId)
                     || update.ClearState == 0)
                 {
                     throw new ArgumentException(
-                        "Anton Awakening progress updates require dungeon IDs 243-247 and non-zero states.",
+                        "Sequential progress updates require configured dungeon IDs and non-zero states.",
                         nameof(updates));
                 }
 
@@ -253,18 +268,22 @@ VALUES
         private static List<DungeonPermissionEntrySnapshot> Load(
             SqliteConnection connection,
             SqliteTransaction transaction,
-            int characterId)
+            int characterId,
+            SequentialDungeonDefinition definition)
         {
             var result = new List<DungeonPermissionEntrySnapshot>();
-            using (var command = new SqliteCommand(@"
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                var dungeonParameters = AddDungeonParameters(
+                    command,
+                    definition.DungeonIds);
+                command.CommandText = $@"
 SELECT dungeon_id, clear_state
 FROM character_dungeon_permissions
 WHERE character_id = @cid
-  AND dungeon_id IN (243, 244, 245, 246, 247)
-ORDER BY sort_order;",
-                connection,
-                transaction))
-            {
+  AND dungeon_id IN ({dungeonParameters})
+ORDER BY sort_order;";
                 command.Parameters.AddWithValue("@cid", characterId);
                 using (var reader = command.ExecuteReader())
                 {
@@ -279,6 +298,42 @@ ORDER BY sort_order;",
                 }
             }
             return result;
+        }
+
+        internal static string BuildMarkerKey(int groupKey)
+        {
+            if (groupKey <= 0)
+                throw new ArgumentOutOfRangeException(nameof(groupKey));
+            return "sequential_progress_v1:" + groupKey;
+        }
+
+        private static string AddDungeonParameters(
+            SqliteCommand command,
+            IReadOnlyList<int> dungeonIds)
+        {
+            var parameterNames = new string[dungeonIds.Count];
+            for (var index = 0; index < dungeonIds.Count; index++)
+            {
+                var parameterName = "@did" + index;
+                parameterNames[index] = parameterName;
+                command.Parameters.AddWithValue(
+                    parameterName,
+                    dungeonIds[index]);
+            }
+            return string.Join(",", parameterNames);
+        }
+
+        private static void ValidateDefinition(
+            SequentialDungeonDefinition definition)
+        {
+            if (definition == null)
+                throw new ArgumentNullException(nameof(definition));
+            if (definition.DungeonIds.Count == 0)
+            {
+                throw new ArgumentException(
+                    "A sequential progress definition requires dungeons.",
+                    nameof(definition));
+            }
         }
 
         private static void ValidateCharacterId(int characterId)

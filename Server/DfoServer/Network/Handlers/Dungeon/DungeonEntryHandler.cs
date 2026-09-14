@@ -256,11 +256,15 @@ namespace DfoServer.Network.Handlers.Dungeon
         {
             if (run == null
                 || (run.RunState != DungeonRunState.ClearCommitting
-                    && run.RunState != DungeonRunState.Cleared)
-                || !AntonNormalConquest.TryGetSequenceByKey(
-                    AntonAwakeningDailyProgressService.ConfigKey,
-                    out var sequence)
-                || sequence.IndexOf(run.DungeonId) < 0
+                    && run.RunState != DungeonRunState.Cleared))
+            {
+                return false;
+            }
+
+            var definition = run.Instance?.SequentialDefinition;
+            if (definition == null
+                || !definition.ShowIndividualProcess
+                || definition.IndexOf(run.DungeonId) < 0
                 || request.DungeonId != run.DungeonId
                 || request.Difficulty != run.Difficulty
                 || request.Flag1 != 0

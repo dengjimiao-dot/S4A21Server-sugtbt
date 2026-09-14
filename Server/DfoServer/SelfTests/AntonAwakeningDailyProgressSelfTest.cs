@@ -1,6 +1,7 @@
 using DfoServer.Game.DailyReset;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.SelectCharacter;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
 using System;
@@ -45,8 +46,25 @@ namespace DfoServer.SelfTests
                 var repository = new AntonAwakeningDailyProgressRepository(
                     database,
                     dailyReset);
+                var catalog = BuildDailyProgressCatalog(
+                    99,
+                    243,
+                    244,
+                    245,
+                    246,
+                    247);
+                var definition = catalog.Definitions.Single();
+                Check(
+                    "daily marker key is namespaced by sequential group",
+                    AntonAwakeningDailyProgressRepository.BuildMarkerKey(
+                        definition.GroupKey)
+                        == "sequential_progress_v1:99",
+                    ref failures);
 
-                repository.EnsureCurrentDayAndLoad(characterA, beforeUtc);
+                repository.EnsureCurrentDayAndLoad(
+                    characterA,
+                    definition,
+                    beforeUtc);
                 foreach (var dungeonId in new[]
                     { 225, 231, 243, 244, 245, 246, 247 })
                 {
@@ -56,6 +74,7 @@ namespace DfoServer.SelfTests
 
                 var beforeRows = repository.EnsureCurrentDayAndLoad(
                     characterA,
+                    definition,
                     beforeUtc);
                 Check(
                     "same-day load preserves all five awakening rows",
@@ -64,6 +83,7 @@ namespace DfoServer.SelfTests
 
                 var afterRows = repository.EnsureCurrentDayAndLoad(
                     characterA,
+                    definition,
                     boundaryUtc);
                 Check(
                     "06:00 rollover removes only the current character's 243-247 rows",
@@ -76,13 +96,17 @@ namespace DfoServer.SelfTests
                 SeedCounter(
                     database,
                     characterB,
-                    AntonAwakeningDailyProgressRepository.MarkerKey,
+                    AntonAwakeningDailyProgressRepository.BuildMarkerKey(
+                        definition.GroupKey),
                     DailyResetService.PeriodWeek,
                     0);
                 var markerFailureRolledBack = false;
                 try
                 {
-                    repository.EnsureCurrentDayAndLoad(characterB, boundaryUtc);
+                    repository.EnsureCurrentDayAndLoad(
+                        characterB,
+                        definition,
+                        boundaryUtc);
                 }
                 catch (InvalidOperationException)
                 {
@@ -95,7 +119,10 @@ namespace DfoServer.SelfTests
                     ref failures);
                 Check(
                     "rollover installs one current-day marker",
-                    ReadMarker(database, characterA) == 1
+                    ReadMarker(
+                        database,
+                        characterA,
+                        definition.GroupKey) == 1
                     && ReadDayId(database, characterA)
                         == DailyResetService.TodayId(boundaryUtc),
                     ref failures);
@@ -103,6 +130,7 @@ namespace DfoServer.SelfTests
                 var anchoredNow = boundaryUtc.AddSeconds(1);
                 var service = new AntonAwakeningDailyProgressService(
                     repository,
+                    catalog,
                     () => anchoredNow);
                 var expected = new[]
                 {
@@ -120,7 +148,7 @@ namespace DfoServer.SelfTests
                     Check(
                         $"clear {item.DungeonId} projects progress and route mask",
                         applied
-                        && result.State.Sequence.ConfigKey == 41
+                        && result.State.Sequence.ConfigKey == 99
                         && result.State.ProgressIndex == item.Progress
                         && result.State.RouteMask == item.Mask,
                         ref failures);
@@ -136,54 +164,73 @@ namespace DfoServer.SelfTests
                     new AntonAwakeningDailyProgressRepository(
                         database,
                         new DailyResetService(database)),
+                    catalog,
                     () => anchoredNow.AddMinutes(1));
                 Check(
                     "same-day progress survives service reconstruction",
-                    reconstructed.TryRestore(characterA, 41, out var restored)
+                    reconstructed.TryRestore(characterA, 99, out var restored)
                     && restored.ProgressIndex == 5
                     && restored.RouteMask == 0x0F,
                     ref failures);
 
-                repository.EnsureCurrentDayAndLoad(stateCharacter, anchoredNow);
-                var completedState = ResolveCompletedState(245);
+                repository.EnsureCurrentDayAndLoad(
+                    stateCharacter,
+                    definition,
+                    anchoredNow);
+                var completedState = ResolveCompletedState(definition, 245);
                 Check(
                     "current PVF completed state for awakening difficulty is three",
                     completedState == 3,
                     ref failures);
-                RecordState(repository, stateCharacter, 245, 1, anchoredNow);
+                RecordState(
+                    repository,
+                    definition,
+                    stateCharacter,
+                    245,
+                    1,
+                    anchoredNow);
                 Check(
                     "state one does not satisfy a route bit",
-                    service.TryRestore(stateCharacter, 41, out var stateOne)
+                    service.TryRestore(stateCharacter, 99, out var stateOne)
                     && stateOne.RouteMask == 0,
                     ref failures);
-                RecordState(repository, stateCharacter, 245, 2, anchoredNow);
+                RecordState(
+                    repository,
+                    definition,
+                    stateCharacter,
+                    245,
+                    2,
+                    anchoredNow);
                 Check(
                     "state two does not satisfy a route bit",
-                    service.TryRestore(stateCharacter, 41, out var stateTwo)
+                    service.TryRestore(stateCharacter, 99, out var stateTwo)
                     && stateTwo.RouteMask == 0,
                     ref failures);
                 RecordState(
                     repository,
+                    definition,
                     stateCharacter,
                     245,
                     completedState,
                     anchoredNow);
                 Check(
                     "completed state sets only dungeon 245's route bit",
-                    service.TryRestore(stateCharacter, 41, out var stateThree)
+                    service.TryRestore(stateCharacter, 99, out var stateThree)
                     && stateThree.RouteMask == 0x04,
                     ref failures);
 
                 repository.EnsureCurrentDayAndLoad(
                     incompleteCharacter,
+                    definition,
                     anchoredNow);
                 foreach (var dungeonId in new[] { 243, 244, 246 })
                 {
                     RecordState(
                         repository,
+                        definition,
                         incompleteCharacter,
                         dungeonId,
-                        ResolveCompletedState(dungeonId),
+                        ResolveCompletedState(definition, dungeonId),
                         anchoredNow);
                 }
                 var leaderDecision = service.EvaluateAdmission(characterA, 247);
@@ -205,7 +252,13 @@ namespace DfoServer.SelfTests
                 var invalidRejected = false;
                 try
                 {
-                    RecordState(repository, characterA, 242, 3, anchoredNow);
+                    RecordState(
+                        repository,
+                        definition,
+                        characterA,
+                        242,
+                        3,
+                        anchoredNow);
                 }
                 catch (ArgumentException)
                 {
@@ -226,6 +279,7 @@ namespace DfoServer.SelfTests
                     "anton-progress-a4");
                 repository.EnsureCurrentDayAndLoad(
                     rollbackCharacter,
+                    definition,
                     anchoredNow);
                 CreateFailingPermissionTrigger(database);
                 var mutationRolledBack = false;
@@ -233,17 +287,22 @@ namespace DfoServer.SelfTests
                 {
                     repository.RecordClearAndLoad(
                         rollbackCharacter,
+                        definition,
                         new[]
                         {
                             new DungeonPermissionEntrySnapshot
                             {
                                 DungeonId = 243,
-                                ClearState = ResolveCompletedState(243),
+                                ClearState = ResolveCompletedState(
+                                    definition,
+                                    243),
                             },
                             new DungeonPermissionEntrySnapshot
                             {
                                 DungeonId = 245,
-                                ClearState = ResolveCompletedState(245),
+                                ClearState = ResolveCompletedState(
+                                    definition,
+                                    245),
                             },
                         },
                         anchoredNow,
@@ -262,6 +321,83 @@ namespace DfoServer.SelfTests
                     mutationRolledBack
                     && !PermissionExists(database, rollbackCharacter, 243)
                     && !PermissionExists(database, rollbackCharacter, 245),
+                    ref failures);
+
+                const int dynamicCharacter = 61015;
+                SeedCharacter(
+                    database,
+                    dynamicCharacter,
+                    accountA,
+                    "sequential-progress-dynamic");
+                var dynamicCatalog = BuildDailyProgressCatalog(
+                    101,
+                    1001,
+                    1003,
+                    1008);
+                var dynamicDefinition = dynamicCatalog.Definitions.Single();
+                repository.EnsureCurrentDayAndLoad(
+                    dynamicCharacter,
+                    dynamicDefinition,
+                    beforeUtc);
+                foreach (var dungeonId in new[] { 1001, 1002, 1003, 1008 })
+                    SeedPermission(database, dynamicCharacter, dungeonId, 2);
+                var dynamicRows = repository.EnsureCurrentDayAndLoad(
+                    dynamicCharacter,
+                    dynamicDefinition,
+                    boundaryUtc);
+                Check(
+                    "repository uses the Definition's dynamic dungeon set",
+                    dynamicRows.Count == 0
+                    && !PermissionExists(database, dynamicCharacter, 1001)
+                    && PermissionExists(database, dynamicCharacter, 1002)
+                    && !PermissionExists(database, dynamicCharacter, 1003)
+                    && !PermissionExists(database, dynamicCharacter, 1008),
+                    ref failures);
+                var dynamicSnapshot = repository.RecordClearAndLoad(
+                    dynamicCharacter,
+                    dynamicDefinition,
+                    new[]
+                    {
+                        new DungeonPermissionEntrySnapshot
+                        {
+                            DungeonId = 1003,
+                            ClearState = 2,
+                        },
+                    },
+                    boundaryUtc,
+                    out var dynamicChanges);
+                Check(
+                    "repository loads and updates only dynamic Definition IDs",
+                    dynamicChanges.Count == 1
+                    && dynamicChanges[0].DungeonId == 1003
+                    && dynamicSnapshot.Count == 1
+                    && dynamicSnapshot[0].DungeonId == 1003
+                    && PermissionExists(database, dynamicCharacter, 1002),
+                    ref failures);
+                var dynamicOutOfScopeRejected = false;
+                try
+                {
+                    repository.RecordClearAndLoad(
+                        dynamicCharacter,
+                        dynamicDefinition,
+                        new[]
+                        {
+                            new DungeonPermissionEntrySnapshot
+                            {
+                                DungeonId = 1002,
+                                ClearState = 2,
+                            },
+                        },
+                        boundaryUtc,
+                        out _);
+                }
+                catch (ArgumentException)
+                {
+                    dynamicOutOfScopeRejected = true;
+                }
+                Check(
+                    "repository validation rejects IDs outside the Definition",
+                    dynamicOutOfScopeRejected,
                     ref failures);
 
                 Check(
@@ -298,12 +434,14 @@ namespace DfoServer.SelfTests
             return failures == 0 ? 0 : 1;
         }
 
-        private static byte ResolveCompletedState(int dungeonId)
+        private static byte ResolveCompletedState(
+            SequentialDungeonDefinition definition,
+            int dungeonId)
         {
-            if (!AntonNormalConquest.TryGetSequenceByKey(41, out var sequence)
+            if (definition == null
                 || !AntonNormalConquest.TryResolveCompletedState(
                     dungeonId,
-                    sequence.Difficulty,
+                    definition.Difficulty,
                     out var state))
             {
                 throw new InvalidOperationException(
@@ -314,6 +452,7 @@ namespace DfoServer.SelfTests
 
         private static void RecordState(
             AntonAwakeningDailyProgressRepository repository,
+            SequentialDungeonDefinition definition,
             int characterId,
             int dungeonId,
             byte clearState,
@@ -321,6 +460,7 @@ namespace DfoServer.SelfTests
         {
             repository.RecordClearAndLoad(
                 characterId,
+                definition,
                 new[]
                 {
                     new DungeonPermissionEntrySnapshot
@@ -331,6 +471,31 @@ namespace DfoServer.SelfTests
                 },
                 utcNow,
                 out _);
+        }
+
+        private static SequentialDungeonDefinitionCatalog
+            BuildDailyProgressCatalog(int groupKey, params int[] dungeonIds)
+        {
+            var joinedDungeonIds = string.Join(" ", dungeonIds);
+            var finalDungeonId = dungeonIds[dungeonIds.Length - 1];
+            var config = $@"
+[sequential dungeon]
+{groupKey}
+[dungeon index check]
+{joinedDungeonIds}
+[/dungeon index check]
+[show individual process]
+[/show individual process]
+[entrance except dungeon]
+{finalDungeonId}
+[/entrance except dungeon]
+[always visible dungeon]
+{finalDungeonId}
+[/always visible dungeon]
+[/sequential dungeon]";
+            return SequentialDungeonDefinitionCatalog.Parse(
+                config,
+                _ => (byte)2);
         }
 
         private static void SeedAccount(
@@ -483,7 +648,10 @@ END;";
             });
         }
 
-        private static long ReadMarker(GameDatabase database, int characterId)
+        private static long ReadMarker(
+            GameDatabase database,
+            int characterId,
+            int groupKey)
         {
             return database.Read(connection =>
             {
@@ -498,7 +666,8 @@ WHERE character_id = @cid
                     command.Parameters.AddWithValue("@cid", characterId);
                     command.Parameters.AddWithValue(
                         "@key",
-                        AntonAwakeningDailyProgressRepository.MarkerKey);
+                        AntonAwakeningDailyProgressRepository.BuildMarkerKey(
+                            groupKey));
                     return Convert.ToInt64(command.ExecuteScalar() ?? 0L);
                 }
             });

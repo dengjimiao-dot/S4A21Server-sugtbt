@@ -24,17 +24,14 @@ namespace DfoServer.Game.Dungeon
         private const int LinkedChallengeRate = 100;
         private const int LinkedChallengeCondition = -1;
         private readonly SqliteCharacterStateRepository _repository;
-        private readonly AntonAwakeningDailyLootGuard _lootGuard;
         private readonly AntonAwakeningDailyProgressService _awakeningProgress;
 
         internal AntonNormalConquestApplicationService(
             SqliteCharacterStateRepository repository,
-            AntonAwakeningDailyLootGuard lootGuard = null,
             AntonAwakeningDailyProgressService awakeningProgress = null)
         {
             _repository = repository
                 ?? throw new ArgumentNullException(nameof(repository));
-            _lootGuard = lootGuard;
             _awakeningProgress = awakeningProgress;
         }
 
@@ -67,13 +64,13 @@ namespace DfoServer.Game.Dungeon
             state = null;
             if (characterId <= 0)
                 return false;
-            if (configKey == AntonAwakeningDailyProgressService.ConfigKey
-                && _awakeningProgress != null)
-            {
-                return _awakeningProgress.TryRestore(
+            if (_awakeningProgress != null
+                && _awakeningProgress.TryRestore(
                     characterId,
                     configKey,
-                    out state);
+                    out state))
+            {
+                return true;
             }
             return AntonNormalConquest.TryResolveSyncState(
                 configKey,
@@ -90,18 +87,12 @@ namespace DfoServer.Game.Dungeon
             if (characterId <= 0)
                 return false;
 
-            if (AntonAwakeningDailyProgressService.IsTrackedDungeon(dungeonId))
+            if (_awakeningProgress != null
+                && _awakeningProgress.TryApplyClear(
+                    characterId,
+                    dungeonId,
+                    out result))
             {
-                if (_awakeningProgress == null
-                    || !_awakeningProgress.TryApplyClear(
-                        characterId,
-                        dungeonId,
-                        out result))
-                {
-                    return false;
-                }
-
-                MarkLootClaimed(characterId, dungeonId);
                 return true;
             }
 
@@ -138,21 +129,8 @@ namespace DfoServer.Game.Dungeon
                 return false;
             }
 
-            MarkLootClaimed(characterId, dungeonId);
-
             result = new AntonNormalClearApplicationResult(state, changes);
             return true;
-        }
-
-        private void MarkLootClaimed(int characterId, int dungeonId)
-        {
-            if (_lootGuard != null
-                && AntonAwakeningDailyLootGuard.IsAntonAwakeningDungeon(
-                    dungeonId)
-                && !_lootGuard.HasClaimedLootToday(characterId, dungeonId))
-            {
-                _lootGuard.TryMarkLootClaimed(characterId, dungeonId);
-            }
         }
 
         private static void AddPermissionUpdate(

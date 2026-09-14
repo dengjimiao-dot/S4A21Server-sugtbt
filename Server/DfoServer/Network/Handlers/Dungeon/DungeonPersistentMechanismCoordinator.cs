@@ -20,7 +20,6 @@ namespace DfoServer.Network.Handlers.Dungeon
         {
             _antonNormal = new AntonNormalConquestNotifier(
                 characterStateRepository,
-                antonLootGuard,
                 awakeningProgress);
             _awakeningProgress = awakeningProgress;
         }
@@ -48,19 +47,14 @@ namespace DfoServer.Network.Handlers.Dungeon
             int characterId,
             int dungeonId)
         {
-            if (_awakeningProgress != null)
+            if (_awakeningProgress == null)
             {
-                return _awakeningProgress.EvaluateAdmission(
-                    characterId,
-                    dungeonId);
+                throw new InvalidOperationException(
+                    "Sequential daily progress service is unavailable.");
             }
-            if (dungeonId != AntonAwakeningDailyProgressService.FinalDungeonId)
-            {
-                return new AntonAwakeningAdmissionDecision(
-                    AntonAwakeningAdmissionStatus.NotApplicable);
-            }
-            throw new InvalidOperationException(
-                "Anton Awakening daily progress service is unavailable.");
+            return _awakeningProgress.EvaluateAdmission(
+                characterId,
+                dungeonId);
         }
 
         internal Task ApplyDungeonClearAsync(

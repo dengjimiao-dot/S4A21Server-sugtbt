@@ -1,4 +1,5 @@
 using DfoServer.Game.SelectCharacter;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using System;
 using System.Collections.Generic;
@@ -32,26 +33,18 @@ namespace DfoServer.Game.Dungeon
 
     internal sealed class AntonAwakeningDailyProgressService
     {
-        internal const int ConfigKey = 41;
-        internal const int FirstDungeonId = 243;
-        internal const int FinalDungeonId = 247;
-        internal const int RequiredRouteMask = 0x0F;
-
-        internal static bool IsTrackedDungeon(int dungeonId)
-            => dungeonId >= FirstDungeonId && dungeonId <= FinalDungeonId;
-
-        private static readonly int[] PrerequisiteDungeonIds =
-            { 243, 244, 245, 246 };
-
         private readonly AntonAwakeningDailyProgressRepository _repository;
+        private readonly SequentialDungeonDefinitionCatalog _catalog;
         private readonly Func<DateTime> _utcNow;
 
         internal AntonAwakeningDailyProgressService(
             AntonAwakeningDailyProgressRepository repository,
+            SequentialDungeonDefinitionCatalog catalog = null,
             Func<DateTime> utcNow = null)
         {
             _repository = repository
                 ?? throw new ArgumentNullException(nameof(repository));
+            _catalog = catalog ?? SequentialDungeonDefinitionCatalog.Current;
             _utcNow = utcNow ?? (() => DateTime.UtcNow);
         }
 
@@ -62,18 +55,17 @@ namespace DfoServer.Game.Dungeon
         {
             state = null;
             if (characterId <= 0
-                || configKey != ConfigKey
-                || !AntonNormalConquest.TryGetSequenceByKey(
-                    ConfigKey,
-                    out var sequence))
+                || !_catalog.TryGetByGroupKey(configKey, out var definition)
+                || !definition.ShowIndividualProcess)
             {
                 return false;
             }
 
             var permissions = _repository.EnsureCurrentDayAndLoad(
                 characterId,
+                definition,
                 _utcNow());
-            state = BuildState(sequence, permissions);
+            state = BuildState(definition, permissions);
             return true;
         }
 
@@ -84,11 +76,16 @@ namespace DfoServer.Game.Dungeon
         {
             result = null;
             if (characterId <= 0
-                || !IsTrackedDungeon(dungeonId)
-                || !AntonNormalConquest.TryGetSequenceByKey(
-                    ConfigKey,
-                    out var sequence)
-                || !AntonNormalConquest.TryResolveClearPlan(
+                || !_catalog.TryResolvePrimaryByDungeonId(
+                    dungeonId,
+                    out var definition)
+                || !definition.ShowIndividualProcess)
+            {
+                return false;
+            }
+
+            var sequence = new AntonNormalSequence(definition);
+            if (!AntonNormalConquest.TryResolveClearPlan(
                     sequence,
                     dungeonId,
                     out var plan))
@@ -114,15 +111,16 @@ namespace DfoServer.Game.Dungeon
 
             var permissions = _repository.RecordClearAndLoad(
                 characterId,
+                definition,
                 updates,
                 _utcNow(),
                 out var changes);
-            var state = BuildState(sequence, permissions);
+            var state = BuildState(definition, permissions);
             result = new AntonNormalClearApplicationResult(state, changes);
             FileLogger.Log(
                 $"[AntonAwakeningProgress] clear persisted: " +
                 $"cid={characterId} dungeon={dungeonId} " +
-                $"key={ConfigKey} progress={state.ProgressIndex} " +
+                $"key={definition.GroupKey} progress={state.ProgressIndex} " +
                 $"routeMask=0x{state.RouteMask:X2}");
             return true;
         }
@@ -131,24 +129,34 @@ namespace DfoServer.Game.Dungeon
             int characterId,
             int dungeonId)
         {
-            if (dungeonId != FinalDungeonId)
+            if (!_catalog.TryResolveEntranceByDungeonId(
+                    dungeonId,
+                    out var definition)
+                || !definition.ShowIndividualProcess)
             {
                 return new AntonAwakeningAdmissionDecision(
                     AntonAwakeningAdmissionStatus.NotApplicable);
             }
             if (characterId <= 0)
                 throw new ArgumentOutOfRangeException(nameof(characterId));
-            if (!TryRestore(characterId, ConfigKey, out var state))
-            {
-                throw new InvalidOperationException(
-                    "Anton Awakening key 41 is unavailable.");
-            }
+
+            var permissions = _repository.EnsureCurrentDayAndLoad(
+                characterId,
+                definition,
+                _utcNow());
+            var clearStates = GroupClearStates(permissions);
 
             var missing = new List<int>();
-            for (var index = 0; index < PrerequisiteDungeonIds.Length; index++)
+            foreach (var prerequisiteDungeonId in
+                definition.PrerequisiteDungeonIds)
             {
-                if ((state.RouteMask & (1 << index)) == 0)
-                    missing.Add(PrerequisiteDungeonIds[index]);
+                if (!IsCompleted(
+                        prerequisiteDungeonId,
+                        definition.Difficulty,
+                        clearStates))
+                {
+                    missing.Add(prerequisiteDungeonId);
+                }
             }
             return missing.Count == 0
                 ? new AntonAwakeningAdmissionDecision(
@@ -162,36 +170,50 @@ namespace DfoServer.Game.Dungeon
         {
             if (characterId <= 0)
                 throw new ArgumentOutOfRangeException(nameof(characterId));
-            _repository.EnsureCurrentDayAndLoad(characterId, _utcNow());
+            var utcNow = _utcNow();
+            foreach (var definition in _catalog.Definitions)
+            {
+                if (!definition.ShowIndividualProcess)
+                    continue;
+                _repository.EnsureCurrentDayAndLoad(
+                    characterId,
+                    definition,
+                    utcNow);
+            }
         }
 
         private static AntonNormalSyncState BuildState(
-            AntonNormalSequence sequence,
+            SequentialDungeonDefinition definition,
             IReadOnlyCollection<DungeonPermissionEntrySnapshot> permissions)
         {
-            var clearStates = (permissions ?? Array.Empty<DungeonPermissionEntrySnapshot>())
-                .GroupBy(entry => (int)entry.DungeonId)
-                .ToDictionary(
-                    group => group.Key,
-                    group => group.Max(entry => entry.ClearState));
+            var sequence = new AntonNormalSequence(definition);
+            var clearStates = GroupClearStates(permissions);
             var routeMask = 0;
             var progressIndex = 0;
             for (var index = 0; index < sequence.DungeonIds.Count; index++)
             {
                 var dungeonId = sequence.DungeonIds[index];
-                if (!AntonNormalConquest.TryResolveCompletedState(
+                if (!IsCompleted(
                         dungeonId,
-                        sequence.Difficulty,
-                        out var completedState)
-                    || !clearStates.TryGetValue(dungeonId, out var persistedState)
-                    || persistedState < completedState)
+                        definition.Difficulty,
+                        clearStates))
                 {
                     continue;
                 }
 
                 progressIndex = Math.Max(progressIndex, index + 1);
-                if (index < PrerequisiteDungeonIds.Length)
+            }
+            for (var index = 0;
+                index < definition.PrerequisiteDungeonIds.Count;
+                index++)
+            {
+                if (IsCompleted(
+                        definition.PrerequisiteDungeonIds[index],
+                        definition.Difficulty,
+                        clearStates))
+                {
                     routeMask |= 1 << index;
+                }
             }
 
             var entries = clearStates
@@ -209,6 +231,27 @@ namespace DfoServer.Game.Dungeon
                 entries,
                 routeMask);
         }
+
+        private static Dictionary<int, byte> GroupClearStates(
+            IReadOnlyCollection<DungeonPermissionEntrySnapshot> permissions)
+            => (permissions ?? Array.Empty<DungeonPermissionEntrySnapshot>())
+                .GroupBy(entry => (int)entry.DungeonId)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.Max(entry => entry.ClearState));
+
+        private static bool IsCompleted(
+            int dungeonId,
+            byte difficulty,
+            IReadOnlyDictionary<int, byte> clearStates)
+            => AntonNormalConquest.TryResolveCompletedState(
+                    dungeonId,
+                    difficulty,
+                    out var completedState)
+                && clearStates.TryGetValue(
+                    dungeonId,
+                    out var persistedState)
+                && persistedState >= completedState;
 
         private static void AddPermissionUpdate(
             ICollection<DungeonPermissionEntrySnapshot> updates,
