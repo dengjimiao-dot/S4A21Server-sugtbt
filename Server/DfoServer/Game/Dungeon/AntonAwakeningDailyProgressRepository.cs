@@ -15,15 +15,18 @@ namespace DfoServer.Game.Dungeon
 
         private readonly IGameDatabase _database;
         private readonly DailyResetService _dailyReset;
+        private readonly SequentialDungeonDefinitionCatalog _catalog;
 
         internal AntonAwakeningDailyProgressRepository(
             IGameDatabase database,
-            DailyResetService dailyReset)
+            DailyResetService dailyReset,
+            SequentialDungeonDefinitionCatalog catalog = null)
         {
             _database = database
                 ?? throw new ArgumentNullException(nameof(database));
             _dailyReset = dailyReset
                 ?? throw new ArgumentNullException(nameof(dailyReset));
+            _catalog = catalog ?? SequentialDungeonDefinitionCatalog.Current;
         }
 
         internal List<DungeonPermissionEntrySnapshot>
@@ -110,11 +113,28 @@ namespace DfoServer.Game.Dungeon
             DateTime utcNow)
         {
             var markerKey = BuildMarkerKey(definition.GroupKey);
-            var hasCurrentDayAnchor = HasCurrentDayAnchor(
+            var resetDayId = ReadResetDayId(
+                connection,
+                transaction,
+                characterId);
+            var hasCurrentDayAnchor = resetDayId.HasValue
+                && resetDayId.Value == DailyResetService.TodayId(utcNow);
+            var hasLegacyMarker = HasCounter(
                 connection,
                 transaction,
                 characterId,
-                utcNow);
+                LegacyMarkerKey,
+                DailyResetService.PeriodDay);
+            if (hasLegacyMarker
+                && (!resetDayId.HasValue || resetDayId.Value == 0))
+            {
+                // A legacy marker without a same-day reset anchor cannot be
+                // dated reliably. Preserve permissions and fail closed before
+                // DailyResetService can roll over or mutate any rows.
+                throw new InvalidOperationException(
+                    "Legacy Anton Awakening progress marker has no current-day reset anchor.");
+            }
+
             var marker = _dailyReset.GetCounter(
                 connection,
                 transaction,
@@ -135,7 +155,7 @@ namespace DfoServer.Game.Dungeon
             // only when the catalog can identify one Anton awakening definition.
             var legacyMarker = 0L;
             if (hasCurrentDayAnchor
-                && SequentialDungeonDefinitionCatalog.Current
+                && _catalog
                 .IsUniqueAntonAwakeningDefinition(definition))
             {
                 legacyMarker = _dailyReset.GetCounter(
@@ -353,11 +373,10 @@ ORDER BY sort_order;";
             return result;
         }
 
-        private static bool HasCurrentDayAnchor(
+        private static int? ReadResetDayId(
             SqliteConnection connection,
             SqliteTransaction transaction,
-            int characterId,
-            DateTime utcNow)
+            int characterId)
         {
             using (var command = connection.CreateCommand())
             {
@@ -368,10 +387,33 @@ FROM character_daily_reset
 WHERE character_id = @cid;";
                 command.Parameters.AddWithValue("@cid", characterId);
                 var value = command.ExecuteScalar();
-                return value != null
-                    && value != DBNull.Value
-                    && Convert.ToInt32(value)
-                        == DailyResetService.TodayId(utcNow);
+                return value == null || value == DBNull.Value
+                    ? (int?)null
+                    : Convert.ToInt32(value);
+            }
+        }
+
+        private static bool HasCounter(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            string counterKey,
+            string period)
+        {
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+SELECT 1
+FROM character_daily_counters
+WHERE character_id = @cid
+  AND counter_key = @key
+  AND period = @period
+LIMIT 1;";
+                command.Parameters.AddWithValue("@cid", characterId);
+                command.Parameters.AddWithValue("@key", counterKey);
+                command.Parameters.AddWithValue("@period", period);
+                return command.ExecuteScalar() != null;
             }
         }
 

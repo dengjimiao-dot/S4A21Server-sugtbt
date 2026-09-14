@@ -33,6 +33,8 @@ namespace DfoServer.SelfTests
                 const int incompleteCharacter = 61013;
                 const int migrationCharacter = 61016;
                 const int staleLegacyCharacter = 61017;
+                const int unanchoredLegacyCharacter = 61018;
+                const int customMigrationCharacter = 61019;
                 SeedAccount(database, accountA, "anton-progress-a");
                 SeedAccount(database, accountB, "anton-progress-b");
                 SeedCharacter(database, characterA, accountA, "anton-progress-a1");
@@ -40,6 +42,8 @@ namespace DfoServer.SelfTests
                 SeedCharacter(database, incompleteCharacter, accountA, "anton-progress-a3");
                 SeedCharacter(database, migrationCharacter, accountA, "anton-progress-a5");
                 SeedCharacter(database, staleLegacyCharacter, accountA, "anton-progress-a6");
+                SeedCharacter(database, unanchoredLegacyCharacter, accountA, "anton-progress-a7");
+                SeedCharacter(database, customMigrationCharacter, accountA, "anton-progress-a8");
                 SeedCharacter(database, characterB, accountB, "anton-progress-b1");
 
                 var beforeUtc = new DateTime(
@@ -58,6 +62,10 @@ namespace DfoServer.SelfTests
                     246,
                     247);
                 var definition = catalog.Definitions.Single();
+                var syntheticRepository = new AntonAwakeningDailyProgressRepository(
+                    database,
+                    dailyReset,
+                    catalog);
                 Check(
                     "daily marker key is namespaced by sequential group",
                     AntonAwakeningDailyProgressRepository.BuildMarkerKey(
@@ -168,6 +176,41 @@ namespace DfoServer.SelfTests
                         && ReadMarker(database, migrationCharacter, currentAntonDefinition.GroupKey) == 1,
                         ref failures);
 
+                    SeedPermission(database, unanchoredLegacyCharacter, 243, 3);
+                    SeedCounter(
+                        database,
+                        unanchoredLegacyCharacter,
+                        "anton_awakening_progress_initialized",
+                        DailyResetService.PeriodDay,
+                        1);
+                    var unanchoredRejected = false;
+                    try
+                    {
+                        repository.EnsureCurrentDayAndLoad(
+                            unanchoredLegacyCharacter,
+                            currentAntonDefinition,
+                            beforeUtc);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        unanchoredRejected = true;
+                    }
+                    Check(
+                        "legacy marker without reset anchor fails closed",
+                        unanchoredRejected
+                        && PermissionExists(
+                            database,
+                            unanchoredLegacyCharacter,
+                            243)
+                        && ReadMarker(
+                            database,
+                            unanchoredLegacyCharacter,
+                            currentAntonDefinition.GroupKey) == 0
+                        && ReadLegacyMarker(
+                            database,
+                            unanchoredLegacyCharacter) == 1,
+                        ref failures);
+
                     SeedDailyResetAnchor(
                         database,
                         staleLegacyCharacter,
@@ -189,11 +232,41 @@ namespace DfoServer.SelfTests
                         && ReadMarker(database, staleLegacyCharacter, currentAntonDefinition.GroupKey) == 1
                         && ReadLegacyMarker(database, staleLegacyCharacter) == 0,
                         ref failures);
+
+                    var customCatalog = BuildSemanticAntonCatalog(199);
+                    var customDefinition = customCatalog.Definitions.Single();
+                    var customRepository = new AntonAwakeningDailyProgressRepository(
+                        database,
+                        dailyReset,
+                        customCatalog);
+                    SeedDailyResetAnchor(
+                        database,
+                        customMigrationCharacter,
+                        beforeUtc);
+                    SeedPermission(database, customMigrationCharacter, 243, 3);
+                    SeedCounter(
+                        database,
+                        customMigrationCharacter,
+                        "anton_awakening_progress_initialized",
+                        DailyResetService.PeriodDay,
+                        1);
+                    var customRows = customRepository.EnsureCurrentDayAndLoad(
+                        customMigrationCharacter,
+                        customDefinition,
+                        beforeUtc);
+                    Check(
+                        "custom semantic catalog controls legacy migration",
+                        customRows.Any(row => row.DungeonId == 243)
+                        && ReadMarker(
+                            database,
+                            customMigrationCharacter,
+                            customDefinition.GroupKey) == 1,
+                        ref failures);
                 }
 
                 var anchoredNow = boundaryUtc.AddSeconds(1);
                 var service = new AntonAwakeningDailyProgressService(
-                    repository,
+                    syntheticRepository,
                     catalog,
                     () => anchoredNow);
                 var expected = new[]
@@ -227,7 +300,8 @@ namespace DfoServer.SelfTests
                 var reconstructed = new AntonAwakeningDailyProgressService(
                     new AntonAwakeningDailyProgressRepository(
                         database,
-                        new DailyResetService(database)),
+                        new DailyResetService(database),
+                        catalog),
                     catalog,
                     () => anchoredNow.AddMinutes(1));
                 Check(
@@ -237,7 +311,7 @@ namespace DfoServer.SelfTests
                     && restored.RouteMask == 0x0F,
                     ref failures);
 
-                repository.EnsureCurrentDayAndLoad(
+                syntheticRepository.EnsureCurrentDayAndLoad(
                     stateCharacter,
                     definition,
                     anchoredNow);
@@ -247,7 +321,7 @@ namespace DfoServer.SelfTests
                     completedState == 3,
                     ref failures);
                 RecordState(
-                    repository,
+                    syntheticRepository,
                     definition,
                     stateCharacter,
                     245,
@@ -259,7 +333,7 @@ namespace DfoServer.SelfTests
                     && stateOne.RouteMask == 0,
                     ref failures);
                 RecordState(
-                    repository,
+                    syntheticRepository,
                     definition,
                     stateCharacter,
                     245,
@@ -271,7 +345,7 @@ namespace DfoServer.SelfTests
                     && stateTwo.RouteMask == 0,
                     ref failures);
                 RecordState(
-                    repository,
+                    syntheticRepository,
                     definition,
                     stateCharacter,
                     245,
@@ -283,14 +357,14 @@ namespace DfoServer.SelfTests
                     && stateThree.RouteMask == 0x04,
                     ref failures);
 
-                repository.EnsureCurrentDayAndLoad(
+                syntheticRepository.EnsureCurrentDayAndLoad(
                     incompleteCharacter,
                     definition,
                     anchoredNow);
                 foreach (var dungeonId in new[] { 243, 244, 246 })
                 {
                     RecordState(
-                        repository,
+                        syntheticRepository,
                         definition,
                         incompleteCharacter,
                         dungeonId,
@@ -339,7 +413,10 @@ namespace DfoServer.SelfTests
 [/sequential dungeon]",
                     _ => (byte)2);
                 var ambiguousService = new AntonAwakeningDailyProgressService(
-                    repository,
+                    new AntonAwakeningDailyProgressRepository(
+                        database,
+                        dailyReset,
+                        ambiguousCatalog),
                     ambiguousCatalog,
                     () => anchoredNow);
                 var ambiguousDecision = ambiguousService.EvaluateAdmission(
@@ -356,7 +433,7 @@ namespace DfoServer.SelfTests
                 try
                 {
                     RecordState(
-                        repository,
+                        syntheticRepository,
                         definition,
                         characterA,
                         242,
@@ -380,7 +457,7 @@ namespace DfoServer.SelfTests
                     rollbackCharacter,
                     accountA,
                     "anton-progress-a4");
-                repository.EnsureCurrentDayAndLoad(
+                syntheticRepository.EnsureCurrentDayAndLoad(
                     rollbackCharacter,
                     definition,
                     anchoredNow);
@@ -388,7 +465,7 @@ namespace DfoServer.SelfTests
                 var mutationRolledBack = false;
                 try
                 {
-                    repository.RecordClearAndLoad(
+                    syntheticRepository.RecordClearAndLoad(
                         rollbackCharacter,
                         definition,
                         new[]
@@ -438,13 +515,17 @@ namespace DfoServer.SelfTests
                     1003,
                     1008);
                 var dynamicDefinition = dynamicCatalog.Definitions.Single();
-                repository.EnsureCurrentDayAndLoad(
+                var dynamicRepository = new AntonAwakeningDailyProgressRepository(
+                    database,
+                    dailyReset,
+                    dynamicCatalog);
+                dynamicRepository.EnsureCurrentDayAndLoad(
                     dynamicCharacter,
                     dynamicDefinition,
                     beforeUtc);
                 foreach (var dungeonId in new[] { 1001, 1002, 1003, 1008 })
                     SeedPermission(database, dynamicCharacter, dungeonId, 2);
-                var dynamicRows = repository.EnsureCurrentDayAndLoad(
+                var dynamicRows = dynamicRepository.EnsureCurrentDayAndLoad(
                     dynamicCharacter,
                     dynamicDefinition,
                     boundaryUtc);
@@ -456,7 +537,7 @@ namespace DfoServer.SelfTests
                     && !PermissionExists(database, dynamicCharacter, 1003)
                     && !PermissionExists(database, dynamicCharacter, 1008),
                     ref failures);
-                var dynamicSnapshot = repository.RecordClearAndLoad(
+                var dynamicSnapshot = dynamicRepository.RecordClearAndLoad(
                     dynamicCharacter,
                     dynamicDefinition,
                     new[]
@@ -480,7 +561,7 @@ namespace DfoServer.SelfTests
                 var dynamicOutOfScopeRejected = false;
                 try
                 {
-                    repository.RecordClearAndLoad(
+                    dynamicRepository.RecordClearAndLoad(
                         dynamicCharacter,
                         dynamicDefinition,
                         new[]
@@ -599,6 +680,33 @@ namespace DfoServer.SelfTests
             return SequentialDungeonDefinitionCatalog.Parse(
                 config,
                 _ => (byte)2);
+        }
+
+        private static SequentialDungeonDefinitionCatalog
+            BuildSemanticAntonCatalog(int groupKey)
+        {
+            var config = $@"
+[sequential dungeon]
+{groupKey}
+[dungeon index check]
+243 244 245 246 247
+[/dungeon index check]
+[show individual process]
+[/show individual process]
+[entrance except dungeon]
+247
+[/entrance except dungeon]
+[rewardable dungeon index]
+247
+[/rewardable dungeon index]
+[clear reward item]
+1 10157831 0
+[/clear reward item]
+[/sequential dungeon]";
+            return SequentialDungeonDefinitionCatalog.Parse(
+                config,
+                _ => (byte)2,
+                _ => true);
         }
 
         private static void SeedAccount(
