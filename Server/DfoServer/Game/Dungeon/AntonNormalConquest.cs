@@ -1,5 +1,5 @@
 using DfoServer.Game.SelectCharacter;
-using DfoServer.Infrastructure;
+using DfoServer.GameWorld;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -9,22 +9,18 @@ namespace DfoServer.Game.Dungeon
 {
     internal sealed class AntonNormalSequence
     {
-        private readonly List<int> _dungeonIds;
+        private readonly SequentialDungeonDefinition _definition;
 
-        internal AntonNormalSequence(
-            int configKey,
-            byte difficulty,
-            IEnumerable<int> dungeonIds)
+        internal AntonNormalSequence(SequentialDungeonDefinition definition)
         {
-            ConfigKey = configKey;
-            Difficulty = difficulty;
-            _dungeonIds = dungeonIds.ToList();
+            _definition = definition
+                ?? throw new ArgumentNullException(nameof(definition));
         }
 
-        internal int ConfigKey { get; }
-        internal byte Difficulty { get; }
-        internal IReadOnlyList<int> DungeonIds => _dungeonIds;
-        internal int IndexOf(int dungeonId) => _dungeonIds.IndexOf(dungeonId);
+        internal int ConfigKey => _definition.GroupKey;
+        internal byte Difficulty => _definition.Difficulty;
+        internal IReadOnlyList<int> DungeonIds => _definition.DungeonIds;
+        internal int IndexOf(int dungeonId) => _definition.IndexOf(dungeonId);
     }
 
     internal sealed class AntonNormalClearPlan
@@ -247,9 +243,12 @@ namespace DfoServer.Game.Dungeon
             int dungeonId,
             out AntonNormalSequence sequence)
         {
-            sequence = Sequences.Value.FirstOrDefault(
-                candidate => candidate.IndexOf(dungeonId) >= 0);
-            return sequence != null;
+            sequence = null;
+            return SequentialDungeonDefinitionCatalog.Current
+                    .TryResolvePrimaryByDungeonId(
+                        dungeonId,
+                        out var definition)
+                && TryGetSequenceByKey(definition.GroupKey, out sequence);
         }
 
         internal static bool TryGetSequenceByKey(
@@ -354,81 +353,10 @@ namespace DfoServer.Game.Dungeon
 
         private static IReadOnlyList<AntonNormalSequence> LoadSequences()
         {
-            var result = new List<AntonNormalSequence>();
-            foreach (var area in GameWorld.WorldMap.Areas)
-            {
-                if (area == null || area.AreaId <= 0)
-                    continue;
-
-                var dungeonIds = area.Dungeons
-                    .Where(entry => entry != null
-                        && !entry.InProgressOnly
-                        && entry.HasExplicitQuestId
-                        && entry.QuestId == -1
-                        && entry.DungeonId > 0
-                        && entry.DungeonId <= ushort.MaxValue)
-                    .Select(entry => entry.DungeonId)
-                    .Distinct()
-                    .ToList();
-                if (dungeonIds.Count < 2)
-                    continue;
-
-                HashSet<int> commonDifficulties = null;
-                var valid = true;
-                foreach (var dungeonId in dungeonIds)
-                {
-                    try
-                    {
-                        var dungeonFile = DungeonData.GetDungeonFile(dungeonId);
-                        if (dungeonFile == null
-                            || !dungeonFile.HasTag("anton dungeon"))
-                        {
-                            valid = false;
-                            break;
-                        }
-
-                        var difficulties = new HashSet<int>(
-                            (dungeonFile.DesignateDungeonDifficulty
-                                ?? Array.Empty<int>())
-                            .Where(value => value >= 0 && value <= 4));
-                        if (difficulties.Count == 0)
-                        {
-                            valid = false;
-                            break;
-                        }
-
-                        if (commonDifficulties == null)
-                            commonDifficulties = difficulties;
-                        else
-                            commonDifficulties.IntersectWith(difficulties);
-                    }
-                    catch
-                    {
-                        valid = false;
-                        break;
-                    }
-                }
-
-                if (!valid
-                    || commonDifficulties == null
-                    || commonDifficulties.Count != 1)
-                {
-                    continue;
-                }
-
-                var sequence = new AntonNormalSequence(
-                    area.AreaId,
-                    (byte)commonDifficulties.Single(),
-                    dungeonIds);
-                result.Add(sequence);
-                FileLogger.Log(
-                    $"[AntonNormal] sequence loaded: " +
-                    $"key={sequence.ConfigKey} " +
-                    $"difficulty={sequence.Difficulty} " +
-                    $"dungeons={string.Join(",", sequence.DungeonIds)}");
-            }
-
-            return result;
+            return SequentialDungeonDefinitionCatalog.Current.Definitions
+                .Select(definition => new AntonNormalSequence(definition))
+                .ToList()
+                .AsReadOnly();
         }
     }
 }

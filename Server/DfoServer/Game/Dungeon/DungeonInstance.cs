@@ -971,6 +971,11 @@ namespace DfoServer.Game.Dungeon
                 ?? throw new ArgumentNullException(nameof(dropDefinition));
             ExperienceDefinition = experienceDefinition
                 ?? throw new ArgumentNullException(nameof(experienceDefinition));
+            GameWorld.SequentialDungeonDefinitionCatalog.Current
+                .TryResolvePrimaryByDungeonId(
+                    dungeonId,
+                    out var sequentialDefinition);
+            SequentialDefinition = sequentialDefinition;
             CreatedUtc = DateTime.UtcNow;
         }
 
@@ -982,6 +987,10 @@ namespace DfoServer.Game.Dungeon
         public DungeonRewardPolicy RewardPolicy { get; }
         public DungeonDropDefinition DropDefinition { get; }
         internal GameWorld.DungeonExperienceDefinition ExperienceDefinition
+        {
+            get;
+        }
+        internal GameWorld.SequentialDungeonDefinition SequentialDefinition
         {
             get;
         }

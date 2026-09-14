@@ -315,7 +315,8 @@ namespace DfoServer.GameWorld
                     && !MonsterCaptureDefinitionCatalog.HasExclusiveItemDrop(
                         monster.Code)
                     && (namedSet == null || !namedSet.Contains(monster.Code))
-                    && !SequentialDungeonMonsterCatalog.Contains(
+                    && !SequentialDungeonDefinitionCatalog.Current
+                        .ContainsConfiguredMonster(
                         dungeonId,
                         monster.Code)
                     && !(specialDungeon
