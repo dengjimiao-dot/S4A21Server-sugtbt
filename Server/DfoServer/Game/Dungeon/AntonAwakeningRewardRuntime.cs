@@ -55,18 +55,69 @@ namespace DfoServer.Game.Dungeon
         internal AntonAwakeningRewardBatchResolution Resolution { get; }
     }
 
-    // Instance-owned, in-process plan/result state. The event-scoped Lazy is a
-    // creation gate: the runtime lock only publishes/reads it, while PVF load,
-    // validation and RNG execute once outside the runtime lock.
+    // Event-scoped reservation for one potentially expensive planning pass.
+    // Evaluation is deliberately separate from publication so the coordinator
+    // can run PVF/STK work outside the instance gate and revalidate the run
+    // before exposing the frozen outcome to projection/grant consumers.
+    internal sealed class AntonAwakeningRewardPlanCreation
+    {
+        private readonly Lazy<AntonAwakeningRewardPlanCreationOutcome>
+            _evaluation;
+        private AntonAwakeningRewardPlanCreationOutcome _evaluated;
+        private AntonAwakeningRewardPlanCreationOutcome _published;
+
+        internal AntonAwakeningRewardPlanCreation(
+            Guid sourceEventId,
+            Func<AntonAwakeningRewardPlanCreationOutcome> factory)
+        {
+            SourceEventId = sourceEventId;
+            _evaluation = new Lazy<AntonAwakeningRewardPlanCreationOutcome>(
+                factory ?? throw new ArgumentNullException(nameof(factory)),
+                LazyThreadSafetyMode.ExecutionAndPublication);
+        }
+
+        internal Guid SourceEventId { get; }
+
+        internal AntonAwakeningRewardPlanCreationOutcome Evaluate()
+        {
+            var outcome = _evaluation.Value;
+            Interlocked.CompareExchange(ref _evaluated, outcome, null);
+            return outcome;
+        }
+
+        internal bool TryPublish(
+            AntonAwakeningRewardPlanCreationOutcome outcome)
+        {
+            if (outcome == null
+                || !ReferenceEquals(Volatile.Read(ref _evaluated), outcome))
+            {
+                return false;
+            }
+
+            var existing = Interlocked.CompareExchange(
+                ref _published,
+                outcome,
+                null);
+            return existing == null || ReferenceEquals(existing, outcome);
+        }
+
+        internal bool TryGetPublished(
+            out AntonAwakeningRewardPlanCreationOutcome outcome)
+        {
+            outcome = Volatile.Read(ref _published);
+            return outcome != null;
+        }
+    }
+
+    // Instance-owned, in-process plan/result state. Runtime methods only
+    // register, publish or read creation reservations while holding _syncRoot;
+    // the caller must evaluate a reservation outside every aggregate gate.
     internal sealed class AntonAwakeningRewardRuntime
     {
         private readonly object _syncRoot = new object();
-        private readonly Dictionary<
-            Guid,
-            Lazy<AntonAwakeningRewardPlanCreationOutcome>> _planCreations =
-                new Dictionary<
-                    Guid,
-                    Lazy<AntonAwakeningRewardPlanCreationOutcome>>();
+        private readonly Dictionary<Guid, AntonAwakeningRewardPlanCreation>
+            _planCreations =
+                new Dictionary<Guid, AntonAwakeningRewardPlanCreation>();
         private readonly Dictionary<(
             Guid SourceEventId,
             DungeonParticipantRunIdentity Participant),
@@ -84,15 +135,15 @@ namespace DfoServer.Game.Dungeon
                     DungeonParticipantRunIdentity),
                     DateTime>();
 
-        internal bool TryGetOrCreatePlan(
+        internal bool TryGetOrRegisterPlanCreation(
             Guid sourceEventId,
             IReadOnlyList<DungeonParticipantRosterEntry> roster,
             AntonAwakeningDailyCardService rewards,
             SequentialDungeonDefinition definition,
             int rewardableDungeonId,
-            out AntonAwakeningRewardPlan plan)
+            out AntonAwakeningRewardPlanCreation creation)
         {
-            plan = null;
+            creation = null;
             if (sourceEventId == Guid.Empty
                 || roster == null
                 || rewards == null)
@@ -101,27 +152,64 @@ namespace DfoServer.Game.Dungeon
             }
 
             var rosterSnapshot = roster.ToArray();
-            Lazy<AntonAwakeningRewardPlanCreationOutcome> creation;
             lock (_syncRoot)
             {
                 if (!_planCreations.TryGetValue(sourceEventId, out creation))
                 {
-                    creation = new Lazy<AntonAwakeningRewardPlanCreationOutcome>(
+                    creation = new AntonAwakeningRewardPlanCreation(
+                        sourceEventId,
                         () => CreatePlan(
                             sourceEventId,
                             rosterSnapshot,
                             rewards,
                             definition,
-                            rewardableDungeonId),
-                        LazyThreadSafetyMode.ExecutionAndPublication);
+                            rewardableDungeonId));
                     _planCreations.Add(sourceEventId, creation);
+                }
+                return true;
+            }
+        }
+
+        internal bool TryEvaluatePlanCreation(
+            AntonAwakeningRewardPlanCreation creation,
+            out AntonAwakeningRewardPlanCreationOutcome outcome)
+        {
+            outcome = null;
+            if (creation == null)
+                return false;
+
+            lock (_syncRoot)
+            {
+                if (!_planCreations.TryGetValue(
+                        creation.SourceEventId,
+                        out var registered)
+                    || !ReferenceEquals(registered, creation))
+                {
+                    return false;
                 }
             }
 
-            // Never evaluate the creation factory while holding _syncRoot.
-            var outcome = creation.Value;
-            plan = outcome.Plan;
-            return plan != null && plan.Entries.Count > 0;
+            // This is the only potentially expensive operation in the API.
+            // It must be called after releasing CardRewardProjectionGate.
+            outcome = creation.Evaluate();
+            return outcome != null;
+        }
+
+        internal bool TryPublishPlanCreation(
+            AntonAwakeningRewardPlanCreation creation,
+            AntonAwakeningRewardPlanCreationOutcome outcome)
+        {
+            if (creation == null || outcome == null)
+                return false;
+
+            lock (_syncRoot)
+            {
+                return _planCreations.TryGetValue(
+                           creation.SourceEventId,
+                           out var registered)
+                    && ReferenceEquals(registered, creation)
+                    && creation.TryPublish(outcome);
+            }
         }
 
         internal bool TryGetPlan(
@@ -129,14 +217,15 @@ namespace DfoServer.Game.Dungeon
             out AntonAwakeningRewardPlan plan)
         {
             plan = null;
-            Lazy<AntonAwakeningRewardPlanCreationOutcome> creation;
+            AntonAwakeningRewardPlanCreation creation;
             lock (_syncRoot)
             {
                 if (!_planCreations.TryGetValue(sourceEventId, out creation))
                     return false;
             }
 
-            var outcome = creation.Value;
+            if (!creation.TryGetPublished(out var outcome))
+                return false;
             plan = outcome.Plan;
             return plan != null && plan.Entries.Count > 0;
         }
@@ -147,14 +236,16 @@ namespace DfoServer.Game.Dungeon
             out AntonAwakeningParticipantRewardResolution resolution)
         {
             resolution = null;
-            Lazy<AntonAwakeningRewardPlanCreationOutcome> creation;
+            AntonAwakeningRewardPlanCreation creation;
             lock (_syncRoot)
             {
                 if (!_planCreations.TryGetValue(sourceEventId, out creation))
                     return false;
             }
 
-            resolution = creation.Value.Resolution.Participants
+            if (!creation.TryGetPublished(out var outcome))
+                return false;
+            resolution = outcome.Resolution.Participants
                 .FirstOrDefault(value => value.Participant.RunIdentity
                     .ParticipantIdentity.Equals(participant));
             return resolution != null;

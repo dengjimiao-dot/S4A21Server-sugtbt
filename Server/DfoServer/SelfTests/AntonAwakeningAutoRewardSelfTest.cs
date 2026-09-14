@@ -22,6 +22,8 @@ namespace DfoServer.SelfTests
             Console.WriteLine("=== ANTON_AWAKENING_AUTO_REWARD selftest ===");
             var failures = 0;
             VerifyStableInstancePlanAndJournal(ref failures);
+            VerifyPreparationPlanningRunsOutsideProjectionGate(ref failures);
+            VerifyStalePreparationIsNotPublished(ref failures);
             VerifyFourParticipantIndependentPlanning(ref failures);
             VerifyParticipantFailureIsolation(ref failures);
             VerifyDelayedProjectionState(ref failures);
@@ -86,6 +88,189 @@ namespace DfoServer.SelfTests
                 "non-rewardable sequential dungeon does not prepare Anton rewards",
                 instance.Mechanisms.AntonAwakeningReward == null,
                 ref failures);
+        }
+
+        private static void VerifyPreparationPlanningRunsOutsideProjectionGate(
+            ref int failures)
+        {
+            var instance = new DungeonInstance(247, 0);
+            var roster = BuildRoster(instance, 4, characterIdBase: 63600);
+            var sourceRun = roster[0].Run;
+            var source = DungeonEventEnvelope.Create(
+                sourceRun,
+                roster[0].CharacterId,
+                "anton-plan-lock-boundary",
+                sourceEventId: Guid.NewGuid());
+            var clearFact = instance.GetOrCreateClearedFact(
+                new DungeonClearIntent(source, "selftest", 0),
+                out _);
+            sourceRun.TryBeginClearCommit(clearFact);
+            sourceRun.TryCompleteClearCommit(clearFact);
+            instance.ParticipantEffects.TryFreeze(
+                clearFact.Source,
+                DungeonParticipantEffectAudience.Instance,
+                roster,
+                out _);
+
+            using (var loaderEntered = new ManualResetEventSlim())
+            using (var releaseLoader = new ManualResetEventSlim())
+            {
+                var rollCalls = 0;
+                var rewards = new AntonAwakeningDailyCardService(
+                    null,
+                    _ =>
+                    {
+                        loaderEntered.Set();
+                        releaseLoader.Wait(TimeSpan.FromSeconds(10));
+                        return BuildUpgradableLegacy((90001, 1, 1));
+                    },
+                    _ =>
+                    {
+                        Interlocked.Increment(ref rollCalls);
+                        return 0;
+                    });
+                var coordinator = new AntonAwakeningRewardCoordinator(
+                    rewards,
+                    new AntonAwakeningRewardGrantService(rewards),
+                    null,
+                    null,
+                    new AntonNormalConquestNotificationSender());
+                System.Threading.Tasks.Task first = null;
+                System.Threading.Tasks.Task second = null;
+                var planningStarted = false;
+                var gateAvailable = false;
+                try
+                {
+                    first = System.Threading.Tasks.Task.Run(() =>
+                        coordinator.PrepareClearAsync(sourceRun, clearFact)
+                            .GetAwaiter()
+                            .GetResult());
+                    planningStarted = loaderEntered.Wait(
+                        TimeSpan.FromSeconds(5));
+                    second = System.Threading.Tasks.Task.Run(() =>
+                        coordinator.PrepareClearAsync(sourceRun, clearFact)
+                            .GetAwaiter()
+                            .GetResult());
+                    gateAvailable = instance.CardRewardProjectionGate.Wait(
+                        TimeSpan.FromSeconds(1));
+                    if (gateAvailable)
+                        instance.CardRewardProjectionGate.Release();
+                }
+                finally
+                {
+                    releaseLoader.Set();
+                    if (first != null && second != null)
+                    {
+                        System.Threading.Tasks.Task.WaitAll(
+                            new[] { first, second },
+                            TimeSpan.FromSeconds(10));
+                    }
+                }
+
+                var runtime = instance.Mechanisms.AntonAwakeningReward;
+                Check(
+                    "STK planning runs outside the instance card projection gate",
+                    planningStarted && gateAvailable,
+                    ref failures);
+                Check(
+                    "concurrent clear preparation evaluates one four-member plan",
+                    first?.IsCompletedSuccessfully == true
+                    && second?.IsCompletedSuccessfully == true
+                    && rollCalls == 8
+                    && runtime != null
+                    && runtime.TryGetPlan(
+                        clearFact.SourceEventId,
+                        out var plan)
+                    && plan.Entries.Count == 4,
+                    ref failures);
+            }
+        }
+
+        private static void VerifyStalePreparationIsNotPublished(
+            ref int failures)
+        {
+            var instance = new DungeonInstance(247, 0);
+            var roster = BuildRoster(instance, 1, characterIdBase: 63700);
+            var sourceRun = roster[0].Run;
+            var source = DungeonEventEnvelope.Create(
+                sourceRun,
+                roster[0].CharacterId,
+                "anton-stale-plan",
+                sourceEventId: Guid.NewGuid());
+            var clearFact = instance.GetOrCreateClearedFact(
+                new DungeonClearIntent(source, "selftest", 0),
+                out _);
+            sourceRun.TryBeginClearCommit(clearFact);
+            sourceRun.TryCompleteClearCommit(clearFact);
+            instance.ParticipantEffects.TryFreeze(
+                clearFact.Source,
+                DungeonParticipantEffectAudience.Instance,
+                roster,
+                out _);
+
+            using (var rollEntered = new ManualResetEventSlim())
+            using (var releaseRoll = new ManualResetEventSlim())
+            {
+                var rollCalls = 0;
+                var rewards = new AntonAwakeningDailyCardService(
+                    null,
+                    _ => BuildUpgradableLegacy((90001, 1, 1)),
+                    _ =>
+                    {
+                        var call = Interlocked.Increment(ref rollCalls);
+                        if (call == 1)
+                        {
+                            rollEntered.Set();
+                            releaseRoll.Wait(TimeSpan.FromSeconds(10));
+                        }
+                        return 0;
+                    });
+                var coordinator = new AntonAwakeningRewardCoordinator(
+                    rewards,
+                    new AntonAwakeningRewardGrantService(rewards),
+                    null,
+                    null,
+                    new AntonNormalConquestNotificationSender());
+                var prepare = System.Threading.Tasks.Task.Run(() =>
+                    coordinator.PrepareClearAsync(sourceRun, clearFact)
+                        .GetAwaiter()
+                        .GetResult());
+                var planningStarted = rollEntered.Wait(
+                    TimeSpan.FromSeconds(5));
+                var gateAvailable = instance.CardRewardProjectionGate.Wait(
+                    TimeSpan.FromSeconds(1));
+                try
+                {
+                    sourceRun.TryBeginEnding();
+                }
+                finally
+                {
+                    if (gateAvailable)
+                        instance.CardRewardProjectionGate.Release();
+                    releaseRoll.Set();
+                }
+                prepare.Wait(TimeSpan.FromSeconds(10));
+
+                var replacementRun = new DungeonRun(
+                    instance,
+                    DungeonIdentityGenerator.NextRunId(),
+                    sourceRun.RunGeneration + 1,
+                    DungeonRunState.Active);
+                coordinator.PrepareClearAsync(replacementRun, clearFact)
+                    .GetAwaiter()
+                    .GetResult();
+                var runtime = instance.Mechanisms.AntonAwakeningReward;
+                Check(
+                    "planning completion for an ending run is not published",
+                    planningStarted
+                    && gateAvailable
+                    && prepare.IsCompletedSuccessfully
+                    && rollCalls == 2
+                    && instance.State == DungeonInstanceState.Cleared
+                    && runtime != null
+                    && !runtime.TryGetPlan(clearFact.SourceEventId, out _),
+                    ref failures);
+            }
         }
 
         private static void VerifyProjectionJournalRecovery(ref int failures)
@@ -557,14 +742,16 @@ namespace DfoServer.SelfTests
             var runtime = new AntonAwakeningRewardRuntime();
             var eventId = Guid.NewGuid();
 
-            var first = runtime.TryGetOrCreatePlan(
+            var first = TryCreateAndPublishPlan(
+                runtime,
                 eventId,
                 roster,
                 rewards,
                 definition,
                 247,
                 out var firstPlan);
-            var second = runtime.TryGetOrCreatePlan(
+            var second = TryCreateAndPublishPlan(
+                runtime,
                 eventId,
                 new[] { roster[0] },
                 rewards,
@@ -880,7 +1067,8 @@ namespace DfoServer.SelfTests
             AntonAwakeningRewardPlan secondPlan = null;
 
             var first = System.Threading.Tasks.Task.Run(() =>
-                runtime.TryGetOrCreatePlan(
+                TryCreateAndPublishPlan(
+                    runtime,
                     sourceEventId,
                     roster,
                     rewards,
@@ -888,7 +1076,8 @@ namespace DfoServer.SelfTests
                     247,
                     out firstPlan));
             var second = System.Threading.Tasks.Task.Run(() =>
-                runtime.TryGetOrCreatePlan(
+                TryCreateAndPublishPlan(
+                    runtime,
                     sourceEventId,
                     roster.Reverse().ToList().AsReadOnly(),
                     rewards,
@@ -952,14 +1141,16 @@ namespace DfoServer.SelfTests
                 });
             var runtime = new AntonAwakeningRewardRuntime();
             var sourceEventId = Guid.NewGuid();
-            var created = runtime.TryGetOrCreatePlan(
+            var created = TryCreateAndPublishPlan(
+                runtime,
                 sourceEventId,
                 roster,
                 rewards,
                 definition,
                 247,
                 out var plan);
-            var replayed = runtime.TryGetOrCreatePlan(
+            var replayed = TryCreateAndPublishPlan(
+                runtime,
                 sourceEventId,
                 roster,
                 rewards,
@@ -998,14 +1189,16 @@ namespace DfoServer.SelfTests
                 });
             var allFailedRuntime = new AntonAwakeningRewardRuntime();
             var allFailedEventId = Guid.NewGuid();
-            var allFailed = allFailedRuntime.TryGetOrCreatePlan(
+            var allFailed = TryCreateAndPublishPlan(
+                allFailedRuntime,
                 allFailedEventId,
                 roster,
                 allFailedRewards,
                 definition,
                 247,
                 out _);
-            var allFailedReplay = allFailedRuntime.TryGetOrCreatePlan(
+            var allFailedReplay = TryCreateAndPublishPlan(
+                allFailedRuntime,
                 allFailedEventId,
                 roster,
                 allFailedRewards,
@@ -1050,6 +1243,36 @@ namespace DfoServer.SelfTests
                     partySlot: (byte)index));
             }
             return roster.AsReadOnly();
+        }
+
+        private static bool TryCreateAndPublishPlan(
+            AntonAwakeningRewardRuntime runtime,
+            Guid sourceEventId,
+            IReadOnlyList<DungeonParticipantRosterEntry> roster,
+            AntonAwakeningDailyCardService rewards,
+            DfoServer.GameWorld.SequentialDungeonDefinition definition,
+            int rewardableDungeonId,
+            out AntonAwakeningRewardPlan plan)
+        {
+            plan = null;
+            if (runtime == null
+                || !runtime.TryGetOrRegisterPlanCreation(
+                    sourceEventId,
+                    roster,
+                    rewards,
+                    definition,
+                    rewardableDungeonId,
+                    out var creation)
+                || !runtime.TryEvaluatePlanCreation(
+                    creation,
+                    out var outcome)
+                || !runtime.TryPublishPlanCreation(creation, outcome))
+            {
+                return false;
+            }
+
+            plan = outcome.Plan;
+            return plan != null && plan.Entries.Count > 0;
         }
 
         private static AntonAwakeningDailyCardService CreateRewardService(

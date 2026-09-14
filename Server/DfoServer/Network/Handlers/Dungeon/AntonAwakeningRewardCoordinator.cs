@@ -64,11 +64,28 @@ namespace DfoServer.Network.Handlers.Dungeon
                 return;
             }
 
-            await sourceRun.Instance.CardRewardProjectionGate.WaitAsync();
+            var instance = sourceRun.Instance;
+            var sourceIdentity = sourceRun.CaptureIdentity();
+            IReadOnlyList<DungeonParticipantRosterEntry> roster = null;
+            AntonAwakeningRewardRuntime runtime = null;
+            AntonAwakeningRewardPlanCreation creation = null;
+
+            await instance.CardRewardProjectionGate.WaitAsync();
             try
             {
-                var journal = sourceRun.Instance.ParticipantEffects;
-                var roster = journal.GetRoster(
+                if (!IsPreparationContextCurrent(
+                        sourceRun,
+                        sourceIdentity,
+                        instance,
+                        clearFact,
+                        rewardDefinition,
+                        expectedRoster: null))
+                {
+                    return;
+                }
+
+                var journal = instance.ParticipantEffects;
+                roster = journal.GetRoster(
                     clearFact.SourceEventId,
                     DungeonParticipantEffectAudience.Instance);
                 if (roster.Count == 0)
@@ -78,40 +95,103 @@ namespace DfoServer.Network.Handlers.Dungeon
                     .Where(value => value != null
                         && !_dailyRewards.HasClaimedRewardToday(
                             value.CharacterId,
-                            sourceRun.Instance.SequentialDefinition.GroupKey,
+                            rewardDefinition.GroupKey,
                             sourceRun.DungeonId))
                     .ToList()
                     .AsReadOnly();
                 if (eligible.Count == 0)
                     return;
 
-                var runtime = GetOrAttachRuntime(sourceRun);
+                runtime = GetOrAttachRuntime(sourceRun);
                 if (runtime == null
-                    || !runtime.TryGetOrCreatePlan(
+                    || !runtime.TryGetOrRegisterPlanCreation(
                         clearFact.SourceEventId,
                         eligible,
                         _dailyRewards,
                         rewardDefinition,
                         sourceRun.DungeonId,
-                        out var plan))
+                        out creation))
                 {
-                    FileLogger.Log(
-                        $"[AntonAwakening] reward plan unavailable: "
-                        + $"instance={sourceRun.PartyDungeonInstanceId} "
-                        + $"event={clearFact.SourceEventId:N}");
                     return;
                 }
-
-                FileLogger.Log(
-                    $"[AntonAwakening] reward plan prepared: "
-                    + $"instance={sourceRun.PartyDungeonInstanceId} "
-                    + $"event={plan.SourceEventId:N} "
-                    + $"participants={plan.Entries.Count}");
             }
             finally
             {
-                sourceRun.Instance.CardRewardProjectionGate.Release();
+                instance.CardRewardProjectionGate.Release();
             }
+
+            AntonAwakeningRewardPlanCreationOutcome outcome;
+            try
+            {
+                if (creation == null
+                    || !runtime.TryEvaluatePlanCreation(
+                        creation,
+                        out outcome))
+                {
+                    FileLogger.Log(
+                        $"[AntonAwakening] reward plan unavailable: "
+                        + $"instance={instance.PartyDungeonInstanceId} "
+                        + $"event={clearFact.SourceEventId:N}");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[AntonAwakening] reward planning failed: "
+                    + $"instance={instance.PartyDungeonInstanceId} "
+                    + $"event={clearFact.SourceEventId:N} "
+                    + $"error={ex.Message}");
+                return;
+            }
+
+            var contextIsCurrent = false;
+            var published = false;
+            await instance.CardRewardProjectionGate.WaitAsync();
+            try
+            {
+                contextIsCurrent = IsPreparationContextCurrent(
+                    sourceRun,
+                    sourceIdentity,
+                    instance,
+                    clearFact,
+                    rewardDefinition,
+                    roster);
+                published = contextIsCurrent
+                    && ReferenceEquals(
+                        instance.Mechanisms.AntonAwakeningReward,
+                        runtime)
+                    && runtime.TryPublishPlanCreation(creation, outcome);
+            }
+            finally
+            {
+                instance.CardRewardProjectionGate.Release();
+            }
+
+            if (!contextIsCurrent)
+            {
+                FileLogger.Log(
+                    $"[AntonAwakening] stale reward plan discarded: "
+                    + $"instance={instance.PartyDungeonInstanceId} "
+                    + $"event={clearFact.SourceEventId:N}");
+                return;
+            }
+
+            var plan = outcome.Plan;
+            if (!published || plan == null || plan.Entries.Count == 0)
+            {
+                FileLogger.Log(
+                    $"[AntonAwakening] reward plan unavailable: "
+                    + $"instance={instance.PartyDungeonInstanceId} "
+                    + $"event={clearFact.SourceEventId:N}");
+                return;
+            }
+
+            FileLogger.Log(
+                $"[AntonAwakening] reward plan prepared: "
+                + $"instance={instance.PartyDungeonInstanceId} "
+                + $"event={plan.SourceEventId:N} "
+                + $"participants={plan.Entries.Count}");
         }
 
         internal async Task OnFreeCardCommittedAsync(
@@ -597,6 +677,52 @@ namespace DfoServer.Network.Handlers.Dungeon
                         run.DungeonId,
                         out var resolved)
                 && ReferenceEquals(resolved, definition);
+        }
+
+        private static bool IsPreparationContextCurrent(
+            DungeonRun sourceRun,
+            DungeonRunIdentity sourceIdentity,
+            DungeonInstance instance,
+            DungeonClearedFact clearFact,
+            SequentialDungeonDefinition rewardDefinition,
+            IReadOnlyList<DungeonParticipantRosterEntry> expectedRoster)
+        {
+            if (sourceRun == null
+                || instance == null
+                || clearFact == null
+                || rewardDefinition == null
+                || !ReferenceEquals(sourceRun.Instance, instance)
+                || !sourceRun.Matches(sourceIdentity)
+                || !clearFact.Source.RunIdentity.Equals(sourceIdentity)
+                || !ReferenceEquals(sourceRun.ClearedFact, clearFact)
+                || !ReferenceEquals(instance.ClearedFact, clearFact)
+                || !ReferenceEquals(
+                    instance.SequentialDefinition,
+                    rewardDefinition)
+                || sourceRun.RunState == DungeonRunState.Ending
+                || sourceRun.RunState == DungeonRunState.Ended
+                || instance.State == DungeonInstanceState.Ending
+                || instance.State == DungeonInstanceState.Ended
+                || !instance.ParticipantEffects.TryGetSource(
+                    clearFact.SourceEventId,
+                    DungeonParticipantEffectAudience.Instance,
+                    out var frozenSource)
+                || !ReferenceEquals(frozenSource, clearFact.Source))
+            {
+                return false;
+            }
+
+            if (expectedRoster == null)
+                return true;
+
+            var currentRoster = instance.ParticipantEffects.GetRoster(
+                clearFact.SourceEventId,
+                DungeonParticipantEffectAudience.Instance);
+            return ReferenceEquals(currentRoster, expectedRoster)
+                && expectedRoster.Count > 0
+                && expectedRoster.All(value => value != null
+                    && ReferenceEquals(value.Run?.Instance, instance)
+                    && value.Run.Matches(value.RunIdentity));
         }
 
         internal static bool IsCurrentParticipantSession(
