@@ -26,11 +26,64 @@ namespace DfoServer.SelfTests
             VerifyProjectionJournalRecovery(ref failures);
             VerifyTimerGrantAfterProjection(ref failures);
             VerifyTransactionalGrant(ref failures);
+            VerifyNonRewardableDungeonDoesNotPrepare(ref failures);
             Console.WriteLine(
                 failures == 0
                     ? "ANTON_AWAKENING_AUTO_REWARD selftest passed."
                     : $"ANTON_AWAKENING_AUTO_REWARD selftest failed: {failures}");
             return failures == 0 ? 0 : 1;
+        }
+
+        private static void VerifyNonRewardableDungeonDoesNotPrepare(
+            ref int failures)
+        {
+            var instance = new DungeonInstance(4108, 0);
+            var run = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            var source = DungeonEventEnvelope.Create(
+                run,
+                63501,
+                "non-rewardable-sequential",
+                sourceEventId: Guid.NewGuid());
+            var clearFact = instance.GetOrCreateClearedFact(
+                new DungeonClearIntent(source, "selftest", 0),
+                out _);
+            run.TryBeginClearCommit(clearFact);
+            run.TryCompleteClearCommit(clearFact);
+            var participant = new DungeonParticipantRosterEntry(
+                63501,
+                901,
+                run,
+                run.CaptureIdentity(),
+                new DungeonRoomIdentity(instance.Identity, 1),
+                1,
+                partySlot: 0);
+            instance.ParticipantEffects.TryFreeze(
+                clearFact.Source,
+                DungeonParticipantEffectAudience.Instance,
+                new[] { participant },
+                out _);
+
+            var service = new AntonAwakeningDailyCardService(
+                null,
+                _ => null,
+                _ => 0);
+            var coordinator = new AntonAwakeningRewardCoordinator(
+                service,
+                new AntonAwakeningRewardGrantService(service),
+                null,
+                null,
+                new AntonNormalConquestNotificationSender());
+            coordinator.PrepareClearAsync(run, clearFact)
+                .GetAwaiter()
+                .GetResult();
+            Check(
+                "non-rewardable sequential dungeon does not prepare Anton rewards",
+                instance.Mechanisms.AntonAwakeningReward == null,
+                ref failures);
         }
 
         private static void VerifyProjectionJournalRecovery(ref int failures)
@@ -518,11 +571,15 @@ namespace DfoServer.SelfTests
                 eventId,
                 roster,
                 rewards,
+                runA.Instance.SequentialDefinition,
+                runA.DungeonId,
                 out var firstPlan);
             var second = runtime.TryGetOrCreatePlan(
                 eventId,
                 new[] { roster[0] },
                 rewards,
+                runA.Instance.SequentialDefinition,
+                runA.DungeonId,
                 out var secondPlan);
             Check(
                 "same clear event reuses one immutable participant plan",

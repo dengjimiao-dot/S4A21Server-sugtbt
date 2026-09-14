@@ -4,8 +4,10 @@ using System.IO;
 using System.Linq;
 using DfoServer.Game.DailyReset;
 using DfoServer.Game.Dungeon;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using Microsoft.Data.Sqlite;
+using PvfLib;
 
 namespace DfoServer.SelfTests
 {
@@ -26,6 +28,7 @@ namespace DfoServer.SelfTests
             var failures = 0;
             VerifyLootCounters(ref failures);
             VerifyRewardPoolParser(ref failures);
+            VerifyTwoStageRewardResolution(ref failures);
             VerifyMalformedRewardPoolsFailClosed(ref failures);
             VerifyRewardDrawPreservesState(ref failures);
             VerifyRewardClaimRollback(ref failures);
@@ -59,7 +62,7 @@ namespace DfoServer.SelfTests
         {
             const string rewards =
                 "915 10157831 0 10 10157832 1 5 10157833 2 70 10157834 1";
-            var candidates = AntonAwakeningDailyCardService.Parse247ClearRewards(
+            var candidates = ParseRewardCandidates(
                 BuildSequentialRewardConfig(26, 41, rewards));
 
             Check("key 41 parser finds four entries", candidates != null && candidates.Count == 4, ref failures);
@@ -98,13 +101,111 @@ namespace DfoServer.SelfTests
             Check(
                 "malformed key 41 definitions fail closed",
                 malformed.All(value =>
-                    AntonAwakeningDailyCardService.Parse247ClearRewards(value) == null),
+                    ParseRewardCandidates(value) == null),
                 ref failures);
+        }
+
+        private static void VerifyTwoStageRewardResolution(ref int failures)
+        {
+            const string config = @"
+[sequential dungeon]
+99
+[dungeon index check]
+243 244 245 246 247
+[/dungeon index check]
+[rewardable dungeon index]
+247
+[/rewardable dungeon index]
+[clear reward item]
+1 7001 0 2 7002 1
+[/clear reward item]
+[/sequential dungeon]";
+            var catalog = SequentialDungeonDefinitionCatalog.Parse(
+                config,
+                _ => (byte)2);
+            Check(
+                "two-stage fixture parses a rewardable definition",
+                catalog.TryGetByGroupKey(99, out var definition)
+                    && definition.RewardableDungeonIds.Contains(247),
+                ref failures);
+
+            var rolls = new Queue<int>(new[] { 1, 4, 0, 0, 1, 4, 0, 0 });
+            var service = new AntonAwakeningDailyCardService(
+                null,
+                id => id == 7002
+                    ? BuildUpgradableLegacy(
+                        (90001, 4, 1),
+                        (90002, 6, 3))
+                    : id == 7001
+                        ? BuildUpgradableLegacy((91000, 1, 2))
+                        : null,
+                maximum => rolls.Dequeue());
+            Check(
+                "outer group and inner STK weights resolve final item/quantity",
+                service.TryDrawReward(definition, 247, out var reward)
+                    && reward.GroupKey == 99
+                    && reward.RewardableDungeonId == 247
+                    && reward.RewardGroupItemId == 7002
+                    && reward.ItemId == 90002
+                    && reward.Quantity == 3
+                    && reward.CardState == 1,
+                ref failures);
+
+            Check(
+                "each participant consumes independent outer and inner rolls",
+                service.TryDrawReward(definition, 247, out var second)
+                    && second.ItemId == 91000
+                    && second.Quantity == 2
+                    && rolls.Count == 4,
+                ref failures);
+
+            var malformedStk = new[]
+            {
+                new StackableItemFile { StackableType = "[upgradable legacy]" },
+                BuildUpgradableLegacy((0, 1, 1)),
+                BuildUpgradableLegacy((90001, 0, 1)),
+                BuildUpgradableLegacy((90001, 1, 0)),
+            };
+            foreach (var stackable in malformedStk)
+            {
+                var malformedService = new AntonAwakeningDailyCardService(
+                    null,
+                    _ => stackable,
+                    _ => 0);
+                Check(
+                    "invalid or empty STK fails closed",
+                    !malformedService.TryDrawReward(
+                        definition,
+                        247,
+                        out _),
+                    ref failures);
+            }
+        }
+
+        private static StackableItemFile BuildUpgradableLegacy(
+            params (int ItemId, int Weight, int Count)[] entries)
+        {
+            var stackable = new StackableItemFile
+            {
+                StackableType = "[upgradable legacy]",
+            };
+            foreach (var entry in entries)
+            {
+                stackable.UpgradableLegacyRewards.Add(
+                    new BoosterRewardEntry
+                    {
+                        RewardKind = "upgradable legacy",
+                        ItemId = entry.ItemId,
+                        Weight = entry.Weight,
+                        Count = entry.Count,
+                    });
+            }
+            return stackable;
         }
 
         private static void VerifyRewardDrawPreservesState(ref int failures)
         {
-            var candidates = AntonAwakeningDailyCardService.Parse247ClearRewards(
+            var candidates = ParseRewardCandidates(
                 BuildSequentialRewardConfig(
                     26,
                     41,
@@ -206,13 +307,55 @@ namespace DfoServer.SelfTests
             return $@"
 [sequential dungeon]
 {firstKey}
+[dungeon index check]
+243 244 245 246 247
+[/dungeon index check]
 [clear reward item]
 1 90000000 0
 [/clear reward item]
 [/sequential dungeon]
 [sequential dungeon]
-{targetKey}{rewardBlock}
+{targetKey}
+[dungeon index check]
+243 244 245 246 247
+[/dungeon index check]
+[rewardable dungeon index]
+247
+[/rewardable dungeon index]{rewardBlock}
 [/sequential dungeon]";
+        }
+
+        private static IReadOnlyList<AntonAwakeningRewardCandidate>
+            ParseRewardCandidates(string config)
+        {
+            try
+            {
+                var catalog = SequentialDungeonDefinitionCatalog.Parse(
+                    config,
+                    _ => (byte)2);
+                if (!catalog.TryGetByGroupKey(41, out var definition)
+                    || definition.ClearRewardGroups.Count == 0)
+                {
+                    return null;
+                }
+
+                return definition.ClearRewardGroups
+                    .Select(group => new AntonAwakeningRewardCandidate(
+                        group.Weight,
+                        new AntonAwakeningRewardDefinition(
+                            definition.GroupKey,
+                            247,
+                            group.RewardGroupItemId,
+                            group.RewardGroupItemId,
+                            1,
+                            group.CardState)))
+                    .ToList()
+                    .AsReadOnly();
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static int WithDatabase(

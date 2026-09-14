@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using DfoServer.GameWorld;
 
 namespace DfoServer.Game.Dungeon
 {
@@ -65,6 +66,8 @@ namespace DfoServer.Game.Dungeon
             Guid sourceEventId,
             IReadOnlyList<DungeonParticipantRosterEntry> roster,
             AntonAwakeningDailyCardService rewards,
+            SequentialDungeonDefinition definition,
+            int rewardableDungeonId,
             out AntonAwakeningRewardPlan plan)
         {
             lock (_syncRoot)
@@ -90,10 +93,17 @@ namespace DfoServer.Game.Dungeon
                              .ThenBy(value => value.ParticipantUserId)
                              .ThenBy(value => value.CharacterId))
                 {
+                    AntonAwakeningRewardDefinition reward;
+                    var drawn = definition != null
+                        ? rewards.TryDrawReward(
+                            definition,
+                            rewardableDungeonId,
+                            out reward)
+                        : rewards.TryDrawReward(out reward);
                     if (!participants.Add(
                             participant.RunIdentity.ParticipantIdentity)
                         || !userIds.Add(participant.ParticipantUserId)
-                        || !rewards.TryDrawReward(out var reward))
+                        || !drawn)
                     {
                         plan = null;
                         return false;
@@ -196,8 +206,14 @@ namespace DfoServer.Game.Dungeon
                 if (_committed.TryGetValue(key, out var existing))
                 {
                     return existing.Outcome == result.Outcome
+                        && existing.Reward.GroupKey == result.Reward.GroupKey
+                        && existing.Reward.RewardableDungeonId
+                            == result.Reward.RewardableDungeonId
+                        && existing.Reward.RewardGroupItemId
+                            == result.Reward.RewardGroupItemId
                         && existing.Reward.ItemId == result.Reward.ItemId
-                        && existing.Reward.State == result.Reward.State;
+                        && existing.Reward.Quantity == result.Reward.Quantity
+                        && existing.Reward.CardState == result.Reward.CardState;
                 }
                 _committed.Add(key, result);
                 return true;

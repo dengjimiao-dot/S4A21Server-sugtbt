@@ -59,7 +59,9 @@ namespace DfoServer.Game.Dungeon
                     if (!_dailyRewards.TryClaimReward(
                             connection,
                             transaction,
-                            lease.CharacterId))
+                            lease.CharacterId,
+                            reward.GroupKey,
+                            reward.RewardableDungeonId))
                     {
                         alreadyClaimed = true;
                         return true;
@@ -69,7 +71,7 @@ namespace DfoServer.Game.Dungeon
                         lease,
                         reward.ItemId,
                         ItemCreateReason.DungeonDrop,
-                        1,
+                        reward.Quantity,
                         out inventoryResult);
                 });
             if (!committed)

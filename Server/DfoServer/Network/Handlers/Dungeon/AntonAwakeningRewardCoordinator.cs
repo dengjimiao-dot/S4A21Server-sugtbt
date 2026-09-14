@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Session;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
 
@@ -53,8 +54,9 @@ namespace DfoServer.Network.Handlers.Dungeon
             DungeonClearedFact clearFact)
         {
             if (sourceRun?.Instance == null
-                || sourceRun.DungeonId
-                    != AntonAwakeningDailyCardService.FinalDungeonId
+                || !TryResolveRewardDefinition(
+                    sourceRun,
+                    out var rewardDefinition)
                 || clearFact == null
                 || clearFact.PresentationKind
                     != DungeonClearPresentationKind.Standard)
@@ -75,7 +77,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                 var eligible = roster
                     .Where(value => value != null
                         && !_dailyRewards.HasClaimedRewardToday(
-                            value.CharacterId))
+                            value.CharacterId,
+                            sourceRun.Instance.SequentialDefinition.GroupKey,
+                            sourceRun.DungeonId))
                     .ToList()
                     .AsReadOnly();
                 if (eligible.Count == 0)
@@ -87,6 +91,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                         clearFact.SourceEventId,
                         eligible,
                         _dailyRewards,
+                        rewardDefinition,
+                        sourceRun.DungeonId,
                         out var plan))
                 {
                     FileLogger.Log(
@@ -241,9 +247,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal Task RecoverParticipantAsync(EnhancedClientSession session)
         {
             var run = session?.Player?.CurrentRun;
-            if (run?.DungeonId
-                    != AntonAwakeningDailyCardService.FinalDungeonId
-                || run.Instance == null)
+            if (!TryResolveRewardDefinition(run, out _))
             {
                 return Task.CompletedTask;
             }
@@ -468,7 +472,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                     $"[AntonAwakening] reward committed: "
                     + $"cid={participant.CharacterId} "
                     + $"userId={participant.ParticipantUserId} "
-                    + $"item={entry.Reward.ItemId} state={entry.Reward.State} "
+                    + $"group={entry.Reward.GroupKey} "
+                    + $"rewardGroup={entry.Reward.RewardGroupItemId} "
+                    + $"item={entry.Reward.ItemId} "
+                    + $"quantity={entry.Reward.Quantity} "
+                    + $"state={entry.Reward.CardState} "
                     + $"outcome={result.Outcome} event={plan.SourceEventId:N}");
                 return true;
             }
@@ -499,8 +507,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             var clearFact = run?.ClearedFact ?? run?.Instance?.ClearedFact;
             if (player == null
                 || run?.Instance == null
-                || run.DungeonId
-                    != AntonAwakeningDailyCardService.FinalDungeonId
+                || !TryResolveRewardDefinition(run, out _)
                 || clearFact?.PresentationKind
                     != DungeonClearPresentationKind.Standard
                 || !ReferenceEquals(player.CurrentRun, run)
@@ -569,6 +576,29 @@ namespace DfoServer.Network.Handlers.Dungeon
                 && IsCurrentParticipantSession(session, participant);
         }
 
+        private static bool TryResolveRewardDefinition(
+            DungeonRun run,
+            out SequentialDungeonDefinition definition)
+        {
+            definition = run?.Instance?.SequentialDefinition;
+            if (definition == null
+                || !definition.IsAntonDungeonSequence
+                || !definition.ShowIndividualProcess
+                || !definition.RewardableDungeonIds.Contains(run.DungeonId))
+            {
+                definition = null;
+                return false;
+            }
+
+            // Resolve through the shared catalog as a capability check, then
+            // continue using the instance-frozen Definition for this run.
+            return SequentialDungeonDefinitionCatalog.Current
+                    .TryResolveRewardableByDungeonId(
+                        run.DungeonId,
+                        out var resolved)
+                && ReferenceEquals(resolved, definition);
+        }
+
         internal static bool IsCurrentParticipantSession(
             EnhancedClientSession session,
             DungeonParticipantRosterEntry participant)
@@ -591,9 +621,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                 result.Add(new AntonAwakeningRewardEntry(
                     entry.Participant.ParticipantUserId,
                     cardType: 0,
-                    flags: (uint)entry.Reward.State,
+                    flags: (uint)entry.Reward.CardState,
                     itemId: (uint)entry.Reward.ItemId,
-                    quantity: 1));
+                    quantity: (uint)entry.Reward.Quantity));
             }
             return result.AsReadOnly();
         }
