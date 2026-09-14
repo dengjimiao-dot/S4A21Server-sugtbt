@@ -2,6 +2,7 @@ using DfoServer.Game.Dungeon;
 using DfoServer.GameWorld;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace DfoServer.SelfTests
@@ -53,7 +54,10 @@ namespace DfoServer.SelfTests
             VerifyEtcProjectionAndIndexes(ref failures);
             VerifyImmutableModelValidation(ref failures);
             VerifyAmbiguousCapabilitiesFailClosed(ref failures);
+            VerifyUnclosedStructuresFailClosed(ref failures);
             VerifyMalformedDefinitionsAreNotPublished(ref failures);
+            VerifyEmptyEtcFailClosed(ref failures);
+            VerifyMissingEtcLoadFailClosed(ref failures);
             VerifyCurrentPvfAndInstanceFreeze(ref failures);
 
             Console.WriteLine(
@@ -276,6 +280,51 @@ namespace DfoServer.SelfTests
 [/clear reward item]
 [/sequential dungeon]
 [sequential dungeon]
+94
+[dungeon index check]
+405 invalid-token
+[/dungeon index check]
+[/sequential dungeon]
+[sequential dungeon]
+95
+[dungeon index check]
+406 407
+[/dungeon index check]
+[clear reward item]
+[/clear reward item]
+[/sequential dungeon]
+[sequential dungeon]
+96
+[dungeon index check]
+408 409
+[/dungeon index check]
+[clear reward item]
+2147483647 7001 0
+1 7002 1
+[/clear reward item]
+[/sequential dungeon]
+[sequential dungeon]
+97
+[dungeon index check]
+500 501 502 503 504 505 506 507
+508 509 510 511 512 513 514 515
+516 517 518 519 520 521 522 523
+524 525 526 527 528 529 530 531
+[/dungeon index check]
+[/sequential dungeon]
+[sequential dungeon]
+98
+[dungeon index check]
+600 601
+[/dungeon index check]
+[/sequential dungeon]
+[sequential dungeon]
+98
+[dungeon index check]
+602 603
+[/dungeon index check]
+[/sequential dungeon]
+[sequential dungeon]
 93
 [dungeon index check]
 403 404
@@ -286,12 +335,194 @@ namespace DfoServer.SelfTests
                 _ => (byte)1);
 
             Check(
-                "malformed groups are omitted without hiding valid groups",
-                !catalog.TryGetByGroupKey(91, out _)
-                && !catalog.TryGetByGroupKey(92, out _)
-                && catalog.TryGetByGroupKey(93, out _)
+                "duplicate dungeon identifier fails closed",
+                !catalog.TryGetByGroupKey(91, out _),
+                ref failures);
+            Check(
+                "negative reward card state fails closed",
+                !catalog.TryGetByGroupKey(92, out _),
+                ref failures);
+            Check(
+                "illegal list token fails closed",
+                !catalog.TryGetByGroupKey(94, out _),
+                ref failures);
+            Check(
+                "explicit empty reward node fails closed",
+                !catalog.TryGetByGroupKey(95, out _),
+                ref failures);
+            Check(
+                "cumulative reward weight overflow fails closed",
+                !catalog.TryGetByGroupKey(96, out _),
+                ref failures);
+            Check(
+                "protocol prerequisite capacity overflow fails closed",
+                !catalog.TryGetByGroupKey(97, out _),
+                ref failures);
+            Check(
+                "duplicate group key fails closed",
+                !catalog.TryGetByGroupKey(98, out _),
+                ref failures);
+            Check(
+                "malformed groups do not hide an adjacent valid definition",
+                catalog.TryGetByGroupKey(93, out _)
                 && catalog.Definitions.Count == 1,
                 ref failures);
+        }
+
+        private static void VerifyUnclosedStructuresFailClosed(
+            ref int failures)
+        {
+            var fields = new[]
+            {
+                (Tag: "dungeon index check", Data: "700 701"),
+                (Tag: "monster index check", Data: "57000"),
+                (Tag: "entrance except dungeon", Data: "701"),
+                (Tag: "rewardable dungeon index", Data: "701"),
+                (Tag: "always visible dungeon", Data: "701"),
+                (Tag: "clear reward item", Data: "1 7001 0"),
+            };
+
+            for (var index = 0; index < fields.Length; index++)
+            {
+                var invalidKey = 110 + index;
+                var config = BuildValidDefinition(109)
+                    + BuildUnclosedFieldDefinition(
+                        invalidKey,
+                        fields[index].Tag,
+                        fields[index].Data);
+                var catalog = SequentialDungeonDefinitionCatalog.Parse(
+                    config,
+                    _ => (byte)1);
+                Check(
+                    $"unclosed {fields[index].Tag} rejects only its definition",
+                    catalog.TryGetByGroupKey(109, out _)
+                    && !catalog.TryGetByGroupKey(invalidKey, out _)
+                    && catalog.Definitions.Count == 1,
+                    ref failures);
+            }
+
+            var implicitFlagCatalog =
+                SequentialDungeonDefinitionCatalog.Parse(
+                    BuildUnclosedFieldDefinition(
+                        117,
+                        "show individual process",
+                        string.Empty)
+                    + BuildValidDefinition(118),
+                    _ => (byte)1);
+            Check(
+                "empty show-individual flag is a legal implicit flag node",
+                implicitFlagCatalog.TryGetByGroupKey(
+                    117,
+                    out var implicitFlag)
+                && implicitFlag.ShowIndividualProcess
+                && implicitFlagCatalog.TryGetByGroupKey(118, out _)
+                && implicitFlagCatalog.Definitions.Count == 2,
+                ref failures);
+
+            var invalidFlagCatalog =
+                SequentialDungeonDefinitionCatalog.Parse(
+                    BuildValidDefinition(119)
+                    + BuildUnclosedFieldDefinition(
+                        120,
+                        "show individual process",
+                        "unexpected-data"),
+                    _ => (byte)1);
+            Check(
+                "unclosed show-individual flag with data fails closed",
+                invalidFlagCatalog.TryGetByGroupKey(119, out _)
+                && !invalidFlagCatalog.TryGetByGroupKey(120, out _)
+                && invalidFlagCatalog.Definitions.Count == 1,
+                ref failures);
+
+            var unclosedSectionCatalog =
+                SequentialDungeonDefinitionCatalog.Parse(
+                    BuildValidDefinition(121)
+                    + @"
+[sequential dungeon]
+122
+[dungeon index check]
+710 711
+[/dungeon index check]",
+                    _ => (byte)1);
+            Check(
+                "unclosed sequential section rejects only its definition",
+                unclosedSectionCatalog.TryGetByGroupKey(121, out _)
+                && !unclosedSectionCatalog.TryGetByGroupKey(122, out _)
+                && unclosedSectionCatalog.Definitions.Count == 1,
+                ref failures);
+        }
+
+        private static void VerifyEmptyEtcFailClosed(ref int failures)
+        {
+            var empty = SequentialDungeonDefinitionCatalog.Parse(
+                string.Empty,
+                _ => (byte)1);
+            var whitespace = SequentialDungeonDefinitionCatalog.Parse(
+                " \r\n\t",
+                _ => (byte)1);
+            Check(
+                "empty ETC publishes no definitions",
+                empty.Definitions.Count == 0
+                && whitespace.Definitions.Count == 0,
+                ref failures);
+        }
+
+        private static void VerifyMissingEtcLoadFailClosed(ref int failures)
+        {
+            const string missingPath =
+                "etc/missing_sequential_dungeon_info.etc";
+            var readAttempts = 0;
+            var catalog = SequentialDungeonDefinitionCatalog.Load(
+                missingPath,
+                path =>
+                {
+                    readAttempts++;
+                    throw new FileNotFoundException(
+                        "Injected missing ETC.",
+                        path);
+                },
+                _ => (byte)1);
+            Check(
+                "missing production ETC fails closed without publishing data",
+                readAttempts == 1 && catalog.Definitions.Count == 0,
+                ref failures);
+        }
+
+        private static string BuildValidDefinition(int groupKey) => $@"
+[sequential dungeon]
+{groupKey}
+[dungeon index check]
+700 701
+[/dungeon index check]
+[/sequential dungeon]";
+
+        private static string BuildUnclosedFieldDefinition(
+            int groupKey,
+            string tag,
+            string data)
+        {
+            var dungeonBlock = string.Equals(
+                tag,
+                "dungeon index check",
+                StringComparison.Ordinal)
+                    ? $@"[dungeon index check]
+{data}"
+                    : @"[dungeon index check]
+700 701
+[/dungeon index check]";
+            var fieldBlock = string.Equals(
+                tag,
+                "dungeon index check",
+                StringComparison.Ordinal)
+                    ? string.Empty
+                    : $@"
+[{tag}]
+{data}";
+            return $@"
+[sequential dungeon]
+{groupKey}
+{dungeonBlock}{fieldBlock}
+[/sequential dungeon]";
         }
 
         private static void VerifyCurrentPvfAndInstanceFreeze(ref int failures)

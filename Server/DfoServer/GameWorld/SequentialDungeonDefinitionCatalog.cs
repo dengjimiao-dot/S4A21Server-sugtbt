@@ -204,7 +204,7 @@ namespace DfoServer.GameWorld
 
         private static readonly Lazy<SequentialDungeonDefinitionCatalog>
             CurrentCatalog =
-                new Lazy<SequentialDungeonDefinitionCatalog>(Load);
+                new Lazy<SequentialDungeonDefinitionCatalog>(LoadCurrent);
 
         private readonly ReadOnlyCollection<SequentialDungeonDefinition>
             _definitions;
@@ -220,8 +220,12 @@ namespace DfoServer.GameWorld
             _rewardableByDungeon;
 
         private SequentialDungeonDefinitionCatalog(
+            string sourcePath,
             IEnumerable<SequentialDungeonDefinition> definitions)
         {
+            sourcePath = string.IsNullOrWhiteSpace(sourcePath)
+                ? DefinitionPath
+                : sourcePath;
             var copied = (definitions
                     ?? Enumerable.Empty<SequentialDungeonDefinition>())
                 .Where(definition => definition != null)
@@ -247,13 +251,15 @@ namespace DfoServer.GameWorld
                 }
             }
 
-            _primaryByDungeon = BuildPrimaryIndex(_byDungeon);
+            _primaryByDungeon = BuildPrimaryIndex(sourcePath, _byDungeon);
             _entranceByDungeon = BuildCapabilityIndex(
+                sourcePath,
                 _byDungeon,
                 (definition, dungeonId) =>
                     definition.EntranceExceptDungeonIds.Contains(dungeonId),
                 "entrance");
             _rewardableByDungeon = BuildCapabilityIndex(
+                sourcePath,
                 _byDungeon,
                 (definition, dungeonId) =>
                     definition.RewardableDungeonIds.Contains(dungeonId),
@@ -320,12 +326,22 @@ namespace DfoServer.GameWorld
         internal static SequentialDungeonDefinitionCatalog Parse(
             string text,
             Func<IReadOnlyList<int>, byte?> difficultyResolver)
+            => Parse(text, difficultyResolver, DefinitionPath);
+
+        private static SequentialDungeonDefinitionCatalog Parse(
+            string text,
+            Func<IReadOnlyList<int>, byte?> difficultyResolver,
+            string sourcePath)
         {
             if (difficultyResolver == null)
                 throw new ArgumentNullException(nameof(difficultyResolver));
+            sourcePath = string.IsNullOrWhiteSpace(sourcePath)
+                ? DefinitionPath
+                : sourcePath;
             if (string.IsNullOrWhiteSpace(text))
             {
                 return new SequentialDungeonDefinitionCatalog(
+                    sourcePath,
                     Array.Empty<SequentialDungeonDefinition>());
             }
 
@@ -335,11 +351,28 @@ namespace DfoServer.GameWorld
             var conflictedGroupKeys = new HashSet<int>();
             foreach (var section in root.GetChildren("sequential dungeon"))
             {
-                if (!TryReadGroupKey(section, text, out var groupKey))
+                var hasGroupKey = TryReadGroupKey(
+                    section,
+                    text,
+                    out var groupKey);
+                if (!section.HasEndTag)
                 {
-                    FileLogger.Log(
-                        "[SequentialDungeonDefinitionCatalog] invalid group key; "
-                        + $"line={section.StartLineIndex + 1}");
+                    LogDiagnostic(
+                        sourcePath,
+                        hasGroupKey ? groupKey.ToString() : "unknown",
+                        "sequential dungeon",
+                        "missing closing tag at line "
+                            + (section.StartLineIndex + 1));
+                    continue;
+                }
+                if (!hasGroupKey)
+                {
+                    LogDiagnostic(
+                        sourcePath,
+                        "unknown",
+                        "group key",
+                        "expected exactly one positive integer at line "
+                            + (section.StartLineIndex + 1));
                     continue;
                 }
 
@@ -348,9 +381,11 @@ namespace DfoServer.GameWorld
                     definitions.RemoveAll(
                         definition => definition.GroupKey == groupKey);
                     conflictedGroupKeys.Add(groupKey);
-                    FileLogger.Log(
-                        "[SequentialDungeonDefinitionCatalog] duplicate group "
-                        + $"key rejected: key={groupKey}");
+                    LogDiagnostic(
+                        sourcePath,
+                        groupKey.ToString(),
+                        "group key",
+                        "duplicate group key");
                     continue;
                 }
 
@@ -360,11 +395,14 @@ namespace DfoServer.GameWorld
                         groupKey,
                         difficultyResolver,
                         out var definition,
-                        out var error))
+                        out var field,
+                        out var reason))
                 {
-                    FileLogger.Log(
-                        "[SequentialDungeonDefinitionCatalog] group rejected: "
-                        + $"key={groupKey} reason={error}");
+                    LogDiagnostic(
+                        sourcePath,
+                        groupKey.ToString(),
+                        field,
+                        reason);
                     continue;
                 }
 
@@ -378,40 +416,67 @@ namespace DfoServer.GameWorld
                         definition.GroupKey));
             }
 
-            return new SequentialDungeonDefinitionCatalog(definitions);
+            return new SequentialDungeonDefinitionCatalog(
+                sourcePath,
+                definitions);
         }
 
-        private static SequentialDungeonDefinitionCatalog Load()
+        internal static SequentialDungeonDefinitionCatalog Load(
+            string sourcePath,
+            Func<string, string> readText,
+            Func<IReadOnlyList<int>, byte?> difficultyResolver)
         {
+            if (string.IsNullOrWhiteSpace(sourcePath))
+                throw new ArgumentException(
+                    "A sequential ETC source path is required.",
+                    nameof(sourcePath));
+            if (readText == null)
+                throw new ArgumentNullException(nameof(readText));
+            if (difficultyResolver == null)
+                throw new ArgumentNullException(nameof(difficultyResolver));
+
             try
             {
                 var catalog = Parse(
-                    PvfArchiveAccessor.ReadText(DefinitionPath),
-                    ResolveDifficulty);
+                    readText(sourcePath),
+                    difficultyResolver,
+                    sourcePath);
                 foreach (var definition in catalog.Definitions)
                 {
-                    FileLogger.Log(
-                        "[SequentialDungeonDefinitionCatalog] group loaded: "
-                        + $"key={definition.GroupKey} "
-                        + $"difficulty={definition.Difficulty} "
-                        + "dungeons="
-                        + string.Join(",", definition.DungeonIds));
+                    LogDiagnostic(
+                        sourcePath,
+                        definition.GroupKey.ToString(),
+                        "definition",
+                        "loaded difficulty=" + definition.Difficulty
+                            + " dungeons="
+                            + string.Join(",", definition.DungeonIds));
                 }
-                FileLogger.Log(
-                    "[SequentialDungeonDefinitionCatalog] loaded "
-                    + $"groups={catalog.Definitions.Count} "
-                    + $"dungeons={catalog._byDungeon.Count}");
+                LogDiagnostic(
+                    sourcePath,
+                    "none",
+                    "catalog",
+                    $"loaded groups={catalog.Definitions.Count} "
+                        + $"dungeons={catalog._byDungeon.Count}");
                 return catalog;
             }
             catch (Exception ex)
             {
-                FileLogger.Log(
-                    "[SequentialDungeonDefinitionCatalog] load failed: "
-                    + $"path={DefinitionPath} reason={ex.Message}");
+                LogDiagnostic(
+                    sourcePath,
+                    "unknown",
+                    "file",
+                    "load failed: " + ex.Message);
                 return new SequentialDungeonDefinitionCatalog(
+                    sourcePath,
                     Array.Empty<SequentialDungeonDefinition>());
             }
         }
+
+        private static SequentialDungeonDefinitionCatalog LoadCurrent() =>
+            Load(
+                DefinitionPath,
+                PvfArchiveAccessor.ReadText,
+                ResolveDifficulty);
 
         private static byte? ResolveDifficulty(
             IReadOnlyList<int> dungeonIds)
@@ -445,52 +510,80 @@ namespace DfoServer.GameWorld
             int groupKey,
             Func<IReadOnlyList<int>, byte?> difficultyResolver,
             out SequentialDungeonDefinition definition,
-            out string error)
+            out string field,
+            out string reason)
         {
             definition = null;
-            error = string.Empty;
+            field = string.Empty;
+            reason = string.Empty;
+
             if (!TryReadRequiredPositiveList(
                     section,
                     "dungeon index check",
                     text,
                     out var dungeonIds,
-                    out error)
-                || !TryReadOptionalPositiveList(
+                    out reason))
+            {
+                field = "dungeon index check";
+                return false;
+            }
+            if (!TryReadOptionalPositiveList(
                     section,
                     "monster index check",
                     text,
                     out var monsterIds,
-                    out error)
-                || !TryReadFlag(
+                    out reason))
+            {
+                field = "monster index check";
+                return false;
+            }
+            if (!TryReadFlag(
                     section,
                     "show individual process",
                     text,
                     out var showIndividualProcess,
-                    out error)
-                || !TryReadOptionalPositiveList(
+                    out reason))
+            {
+                field = "show individual process";
+                return false;
+            }
+            if (!TryReadOptionalPositiveList(
                     section,
                     "entrance except dungeon",
                     text,
                     out var entranceExceptDungeonIds,
-                    out error)
-                || !TryReadOptionalPositiveList(
+                    out reason))
+            {
+                field = "entrance except dungeon";
+                return false;
+            }
+            if (!TryReadOptionalPositiveList(
                     section,
                     "rewardable dungeon index",
                     text,
                     out var rewardableDungeonIds,
-                    out error)
-                || !TryReadOptionalPositiveList(
+                    out reason))
+            {
+                field = "rewardable dungeon index";
+                return false;
+            }
+            if (!TryReadOptionalPositiveList(
                     section,
                     "always visible dungeon",
                     text,
                     out var alwaysVisibleDungeonIds,
-                    out error)
-                || !TryReadClearRewardGroups(
+                    out reason))
+            {
+                field = "always visible dungeon";
+                return false;
+            }
+            if (!TryReadClearRewardGroups(
                     section,
                     text,
                     out var clearRewardGroups,
-                    out error))
+                    out reason))
             {
+                field = "clear reward item";
                 return false;
             }
 
@@ -502,13 +595,15 @@ namespace DfoServer.GameWorld
             }
             catch (Exception ex)
             {
-                error = "difficulty resolution failed: " + ex.Message;
+                field = "difficulty";
+                reason = "resolution failed: " + ex.Message;
                 return false;
             }
 
             if (!difficulty.HasValue)
             {
-                error = "dungeons do not have one common designated difficulty";
+                field = "difficulty";
+                reason = "dungeons do not have one common designated difficulty";
                 return false;
             }
 
@@ -528,7 +623,8 @@ namespace DfoServer.GameWorld
             }
             catch (ArgumentException ex)
             {
-                error = ex.Message;
+                field = "definition";
+                reason = ex.Message;
                 return false;
             }
         }
@@ -555,6 +651,8 @@ namespace DfoServer.GameWorld
             values = null;
             error = string.Empty;
             var nodes = section.GetChildren(tag);
+            if (!TryValidateClosedNodes(nodes, out error))
+                return false;
             if (nodes.Count != 1)
             {
                 error = $"{tag} must occur exactly once";
@@ -580,6 +678,8 @@ namespace DfoServer.GameWorld
             values = new List<int>();
             error = string.Empty;
             var nodes = section.GetChildren(tag);
+            if (!TryValidateClosedNodes(nodes, out error))
+                return false;
             if (nodes.Count > 1)
             {
                 error = $"{tag} must not be repeated";
@@ -649,7 +749,21 @@ namespace DfoServer.GameWorld
             }
             if (nodes.Count == 0)
                 return true;
-            if (ReadTokens(nodes[0], text).Count != 0)
+
+            var node = nodes[0];
+            var isImplicitEmptyFlag = string.Equals(
+                    tag,
+                    "show individual process",
+                    StringComparison.Ordinal)
+                && node?.HasEndTag != true
+                && node?.DataItems?.Count == 0;
+            if (node?.HasEndTag != true && !isImplicitEmptyFlag)
+            {
+                error = "missing closing tag at line "
+                    + ((node?.StartLineIndex ?? -1) + 1);
+                return false;
+            }
+            if (node?.DataItems?.Count > 0)
             {
                 error = $"{tag} flag must not contain data";
                 return false;
@@ -668,6 +782,8 @@ namespace DfoServer.GameWorld
             rewards = new List<SequentialDungeonRewardGroup>();
             error = string.Empty;
             var nodes = section.GetChildren("clear reward item");
+            if (!TryValidateClosedNodes(nodes, out error))
+                return false;
             if (nodes.Count > 1)
             {
                 error = "clear reward item must not be repeated";
@@ -713,6 +829,26 @@ namespace DfoServer.GameWorld
             return true;
         }
 
+        private static bool TryValidateClosedNodes(
+            IReadOnlyList<ScriptNode> nodes,
+            out string error)
+        {
+            error = string.Empty;
+            if (nodes == null)
+                return true;
+
+            foreach (var node in nodes)
+            {
+                if (node?.HasEndTag == true)
+                    continue;
+
+                error = "missing closing tag at line "
+                    + ((node?.StartLineIndex ?? -1) + 1);
+                return false;
+            }
+            return true;
+        }
+
         private static List<string> ReadTokens(
             ScriptNode node,
             string text)
@@ -731,6 +867,7 @@ namespace DfoServer.GameWorld
 
         private static Dictionary<int, SequentialDungeonDefinition>
             BuildPrimaryIndex(
+                string sourcePath,
                 IReadOnlyDictionary<
                     int,
                     List<SequentialDungeonDefinition>> byDungeon)
@@ -752,6 +889,7 @@ namespace DfoServer.GameWorld
                 else
                 {
                     LogCapabilityConflict(
+                        sourcePath,
                         "primary",
                         pair.Key,
                         pair.Value);
@@ -762,6 +900,7 @@ namespace DfoServer.GameWorld
 
         private static Dictionary<int, SequentialDungeonDefinition>
             BuildCapabilityIndex(
+                string sourcePath,
                 IReadOnlyDictionary<
                     int,
                     List<SequentialDungeonDefinition>> byDungeon,
@@ -777,23 +916,57 @@ namespace DfoServer.GameWorld
                 if (candidates.Count == 1)
                     result[pair.Key] = candidates[0];
                 else if (candidates.Count > 1)
-                    LogCapabilityConflict(capability, pair.Key, candidates);
+                    LogCapabilityConflict(
+                        sourcePath,
+                        capability,
+                        pair.Key,
+                        candidates);
             }
             return result;
         }
 
         private static void LogCapabilityConflict(
+            string sourcePath,
             string capability,
             int dungeonId,
             IEnumerable<SequentialDungeonDefinition> candidates)
         {
+            var groupKeys = candidates
+                .Select(value => value.GroupKey)
+                .Distinct()
+                .OrderBy(value => value)
+                .ToArray();
+            LogDiagnostic(
+                sourcePath,
+                "[" + string.Join(",", groupKeys) + "]",
+                capability,
+                $"ambiguous capability for dungeon {dungeonId}; "
+                    + "all candidate group keys="
+                    + string.Join(",", groupKeys));
+        }
+
+        private static void LogDiagnostic(
+            string sourcePath,
+            string groupKey,
+            string field,
+            string reason)
+        {
             FileLogger.Log(
-                "[SequentialDungeonDefinitionCatalog] capability conflict: "
-                + $"capability={capability} dungeon={dungeonId} "
-                + "groups="
-                + string.Join(
-                    ",",
-                    candidates.Select(value => value.GroupKey)));
+                "[SequentialDungeonDefinitionCatalog] "
+                + $"path={Sanitize(sourcePath)} "
+                + $"key={Sanitize(groupKey)} "
+                + $"field={Sanitize(field)} "
+                + $"reason={Sanitize(reason)}");
+        }
+
+        private static string Sanitize(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "unknown";
+            return value
+                .Replace('\r', ' ')
+                .Replace('\n', ' ')
+                .Trim();
         }
     }
 }
