@@ -12,6 +12,7 @@ namespace DfoServer.Game.Dungeon
         NotApplicable = 0,
         Allowed = 1,
         MissingPrerequisites = 2,
+        InvalidState = 3,
     }
 
     internal sealed class AntonAwakeningAdmissionDecision
@@ -129,10 +130,23 @@ namespace DfoServer.Game.Dungeon
             int characterId,
             int dungeonId)
         {
-            if (!_catalog.TryResolveEntranceByDungeonId(
-                    dungeonId,
-                    out var definition)
-                || !definition.ShowIndividualProcess)
+            var resolution = _catalog.ResolveEntranceByDungeonId(
+                dungeonId,
+                out var definition);
+            if (resolution == SequentialDungeonCapabilityResolution.Absent)
+            {
+                return new AntonAwakeningAdmissionDecision(
+                    AntonAwakeningAdmissionStatus.NotApplicable);
+            }
+            if (resolution == SequentialDungeonCapabilityResolution.Ambiguous)
+            {
+                FileLogger.Log(
+                    "[AntonAwakeningProgress] ambiguous entrance capability: "
+                    + $"dungeon={dungeonId}");
+                return new AntonAwakeningAdmissionDecision(
+                    AntonAwakeningAdmissionStatus.InvalidState);
+            }
+            if (!definition.ShowIndividualProcess)
             {
                 return new AntonAwakeningAdmissionDecision(
                     AntonAwakeningAdmissionStatus.NotApplicable);

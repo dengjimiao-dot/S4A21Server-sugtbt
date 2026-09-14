@@ -271,15 +271,26 @@ namespace DfoServer.SelfTests
 
             Check(
                 "ambiguous primary capability fails closed",
-                !catalog.TryResolvePrimaryByDungeonId(300, out _),
+                !catalog.TryResolvePrimaryByDungeonId(300, out _)
+                && catalog.ResolvePrimaryByDungeonId(300, out _)
+                    == SequentialDungeonCapabilityResolution.Ambiguous,
                 ref failures);
             Check(
                 "ambiguous entrance capability fails closed",
-                !catalog.TryResolveEntranceByDungeonId(301, out _),
+                !catalog.TryResolveEntranceByDungeonId(301, out _)
+                && catalog.ResolveEntranceByDungeonId(301, out _)
+                    == SequentialDungeonCapabilityResolution.Ambiguous,
                 ref failures);
             Check(
                 "ambiguous reward capability fails closed",
-                !catalog.TryResolveRewardableByDungeonId(301, out _),
+                !catalog.TryResolveRewardableByDungeonId(301, out _)
+                && catalog.ResolveRewardableByDungeonId(301, out _)
+                    == SequentialDungeonCapabilityResolution.Ambiguous,
+                ref failures);
+            Check(
+                "unconfigured capability is explicitly absent",
+                catalog.ResolveEntranceByDungeonId(999, out _)
+                    == SequentialDungeonCapabilityResolution.Absent,
                 ref failures);
         }
 

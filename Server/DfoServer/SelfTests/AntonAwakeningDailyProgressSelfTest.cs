@@ -31,11 +31,15 @@ namespace DfoServer.SelfTests
                 const int characterB = 61011;
                 const int stateCharacter = 61012;
                 const int incompleteCharacter = 61013;
+                const int migrationCharacter = 61016;
+                const int staleLegacyCharacter = 61017;
                 SeedAccount(database, accountA, "anton-progress-a");
                 SeedAccount(database, accountB, "anton-progress-b");
                 SeedCharacter(database, characterA, accountA, "anton-progress-a1");
                 SeedCharacter(database, stateCharacter, accountA, "anton-progress-a2");
                 SeedCharacter(database, incompleteCharacter, accountA, "anton-progress-a3");
+                SeedCharacter(database, migrationCharacter, accountA, "anton-progress-a5");
+                SeedCharacter(database, staleLegacyCharacter, accountA, "anton-progress-a6");
                 SeedCharacter(database, characterB, accountB, "anton-progress-b1");
 
                 var beforeUtc = new DateTime(
@@ -126,6 +130,66 @@ namespace DfoServer.SelfTests
                     && ReadDayId(database, characterA)
                         == DailyResetService.TodayId(boundaryUtc),
                     ref failures);
+
+                var currentAntonDefinition = SequentialDungeonDefinitionCatalog
+                    .Current.Definitions
+                    .SingleOrDefault(value =>
+                        value.IsAntonDungeonSequence
+                        && value.ShowIndividualProcess
+                        && value.EntranceExceptDungeonIds.Count > 0
+                        && value.RewardableDungeonIds.Count > 0
+                        && value.ClearRewardGroups.Count > 0);
+                Check(
+                    "current catalog has one semantic Anton awakening definition",
+                    currentAntonDefinition != null
+                    && SequentialDungeonDefinitionCatalog.Current
+                        .IsUniqueAntonAwakeningDefinition(currentAntonDefinition),
+                    ref failures);
+                if (currentAntonDefinition != null)
+                {
+                    repository.EnsureCurrentDayAndLoad(
+                        migrationCharacter,
+                        currentAntonDefinition,
+                        beforeUtc);
+                    SeedPermission(database, migrationCharacter, 243, 3);
+                    SeedCounter(
+                        database,
+                        migrationCharacter,
+                        "anton_awakening_progress_initialized",
+                        DailyResetService.PeriodDay,
+                        1);
+                    var migratedRows = repository.EnsureCurrentDayAndLoad(
+                        migrationCharacter,
+                        currentAntonDefinition,
+                        beforeUtc);
+                    Check(
+                        "same-day legacy marker migration preserves progress",
+                        migratedRows.Any(row => row.DungeonId == 243)
+                        && ReadMarker(database, migrationCharacter, currentAntonDefinition.GroupKey) == 1,
+                        ref failures);
+
+                    repository.EnsureCurrentDayAndLoad(
+                        staleLegacyCharacter,
+                        currentAntonDefinition,
+                        beforeUtc);
+                    SeedPermission(database, staleLegacyCharacter, 243, 3);
+                    SeedCounter(
+                        database,
+                        staleLegacyCharacter,
+                        "anton_awakening_progress_initialized",
+                        DailyResetService.PeriodDay,
+                        1);
+                    var staleRows = repository.EnsureCurrentDayAndLoad(
+                        staleLegacyCharacter,
+                        currentAntonDefinition,
+                        boundaryUtc);
+                    Check(
+                        "cross-day legacy marker is not migrated",
+                        staleRows.Count == 0
+                        && ReadMarker(database, staleLegacyCharacter, currentAntonDefinition.GroupKey) == 1
+                        && ReadLegacyMarker(database, staleLegacyCharacter) == 0,
+                        ref failures);
+                }
 
                 var anchoredNow = boundaryUtc.AddSeconds(1);
                 var service = new AntonAwakeningDailyProgressService(
@@ -247,6 +311,45 @@ namespace DfoServer.SelfTests
                 Check(
                     "non-247 admission is a no-op without a character lookup",
                     service.EvaluateAdmission(0, 246).Allowed,
+                    ref failures);
+
+                var ambiguousCatalog = SequentialDungeonDefinitionCatalog.Parse(
+                    @"
+[sequential dungeon]
+201
+[dungeon index check]
+1201 1202
+[/dungeon index check]
+[show individual process]
+[/show individual process]
+[entrance except dungeon]
+1202
+[/entrance except dungeon]
+[/sequential dungeon]
+[sequential dungeon]
+202
+[dungeon index check]
+1201 1202
+[/dungeon index check]
+[show individual process]
+[/show individual process]
+[entrance except dungeon]
+1202
+[/entrance except dungeon]
+[/sequential dungeon]",
+                    _ => (byte)2);
+                var ambiguousService = new AntonAwakeningDailyProgressService(
+                    repository,
+                    ambiguousCatalog,
+                    () => anchoredNow);
+                var ambiguousDecision = ambiguousService.EvaluateAdmission(
+                    characterA,
+                    1202);
+                Check(
+                    "ambiguous entrance capability rejects admission",
+                    !ambiguousDecision.Allowed
+                    && ambiguousDecision.Status
+                        == AntonAwakeningAdmissionStatus.InvalidState,
                     ref failures);
 
                 var invalidRejected = false;
@@ -668,6 +771,26 @@ WHERE character_id = @cid
                         "@key",
                         AntonAwakeningDailyProgressRepository.BuildMarkerKey(
                             groupKey));
+                    return Convert.ToInt64(command.ExecuteScalar() ?? 0L);
+                }
+            });
+        }
+
+        private static long ReadLegacyMarker(
+            GameDatabase database,
+            int characterId)
+        {
+            return database.Read(connection =>
+            {
+                using (var command = connection.CreateCommand())
+                {
+                    command.CommandText = @"
+SELECT value
+FROM character_daily_counters
+WHERE character_id = @cid
+  AND counter_key = 'anton_awakening_progress_initialized'
+  AND period = 'day';";
+                    command.Parameters.AddWithValue("@cid", characterId);
                     return Convert.ToInt64(command.ExecuteScalar() ?? 0L);
                 }
             });

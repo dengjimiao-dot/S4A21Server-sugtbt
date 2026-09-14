@@ -7,6 +7,13 @@ using System.Linq;
 
 namespace DfoServer.GameWorld
 {
+    internal enum SequentialDungeonCapabilityResolution
+    {
+        Absent = 0,
+        Resolved = 1,
+        Ambiguous = 2,
+    }
+
     internal sealed class SequentialDungeonRewardGroup
     {
         internal SequentialDungeonRewardGroup(
@@ -288,27 +295,97 @@ namespace DfoServer.GameWorld
             int dungeonId,
             out SequentialDungeonDefinition definition)
         {
+            return ResolvePrimaryByDungeonId(dungeonId, out definition)
+                == SequentialDungeonCapabilityResolution.Resolved;
+        }
+
+        internal SequentialDungeonCapabilityResolution ResolvePrimaryByDungeonId(
+            int dungeonId,
+            out SequentialDungeonDefinition definition)
+        {
             definition = null;
-            return dungeonId > 0
-                && _primaryByDungeon.TryGetValue(dungeonId, out definition);
+            if (dungeonId <= 0
+                || !_byDungeon.TryGetValue(dungeonId, out var candidates))
+            {
+                return SequentialDungeonCapabilityResolution.Absent;
+            }
+
+            if (_primaryByDungeon.TryGetValue(dungeonId, out definition))
+                return SequentialDungeonCapabilityResolution.Resolved;
+
+            var individual = candidates
+                .Where(value => value.ShowIndividualProcess)
+                .ToList();
+            if (individual.Count == 1)
+            {
+                definition = individual[0];
+                return SequentialDungeonCapabilityResolution.Resolved;
+            }
+            if (individual.Count == 0 && candidates.Count == 1)
+            {
+                definition = candidates[0];
+                return SequentialDungeonCapabilityResolution.Resolved;
+            }
+            return SequentialDungeonCapabilityResolution.Ambiguous;
         }
 
         internal bool TryResolveEntranceByDungeonId(
             int dungeonId,
             out SequentialDungeonDefinition definition)
         {
-            definition = null;
-            return dungeonId > 0
-                && _entranceByDungeon.TryGetValue(dungeonId, out definition);
+            return ResolveEntranceByDungeonId(dungeonId, out definition)
+                == SequentialDungeonCapabilityResolution.Resolved;
+        }
+
+        internal SequentialDungeonCapabilityResolution ResolveEntranceByDungeonId(
+            int dungeonId,
+            out SequentialDungeonDefinition definition)
+        {
+            if (dungeonId > 0
+                && _entranceByDungeon.TryGetValue(dungeonId, out definition))
+            {
+                return SequentialDungeonCapabilityResolution.Resolved;
+            }
+            return ResolveCapabilityByDungeonId(
+                dungeonId,
+                value => value.EntranceExceptDungeonIds.Contains(dungeonId),
+                out definition);
         }
 
         internal bool TryResolveRewardableByDungeonId(
             int dungeonId,
             out SequentialDungeonDefinition definition)
         {
-            definition = null;
-            return dungeonId > 0
-                && _rewardableByDungeon.TryGetValue(dungeonId, out definition);
+            return ResolveRewardableByDungeonId(dungeonId, out definition)
+                == SequentialDungeonCapabilityResolution.Resolved;
+        }
+
+        internal SequentialDungeonCapabilityResolution ResolveRewardableByDungeonId(
+            int dungeonId,
+            out SequentialDungeonDefinition definition)
+        {
+            if (dungeonId > 0
+                && _rewardableByDungeon.TryGetValue(dungeonId, out definition))
+            {
+                return SequentialDungeonCapabilityResolution.Resolved;
+            }
+            return ResolveCapabilityByDungeonId(
+                dungeonId,
+                value => value.RewardableDungeonIds.Contains(dungeonId),
+                out definition);
+        }
+
+        internal bool IsUniqueAntonAwakeningDefinition(
+            SequentialDungeonDefinition definition)
+        {
+            if (definition == null)
+                return false;
+
+            var candidates = Definitions
+                .Where(IsAntonAwakeningCandidate)
+                .ToList();
+            return candidates.Count == 1
+                && candidates[0].GroupKey == definition.GroupKey;
         }
 
         internal bool ContainsConfiguredMonster(
@@ -325,6 +402,38 @@ namespace DfoServer.GameWorld
             return candidates.Any(
                 definition => definition.ContainsMonster(monsterId));
         }
+
+        private SequentialDungeonCapabilityResolution ResolveCapabilityByDungeonId(
+            int dungeonId,
+            Func<SequentialDungeonDefinition, bool> predicate,
+            out SequentialDungeonDefinition definition)
+        {
+            definition = null;
+            if (dungeonId <= 0
+                || !_byDungeon.TryGetValue(dungeonId, out var candidates))
+            {
+                return SequentialDungeonCapabilityResolution.Absent;
+            }
+
+            var matching = candidates.Where(predicate).ToList();
+            if (matching.Count == 1)
+            {
+                definition = matching[0];
+                return SequentialDungeonCapabilityResolution.Resolved;
+            }
+            return matching.Count == 0
+                ? SequentialDungeonCapabilityResolution.Absent
+                : SequentialDungeonCapabilityResolution.Ambiguous;
+        }
+
+        private static bool IsAntonAwakeningCandidate(
+            SequentialDungeonDefinition definition)
+            => definition != null
+                && definition.IsAntonDungeonSequence
+                && definition.ShowIndividualProcess
+                && definition.EntranceExceptDungeonIds.Count > 0
+                && definition.RewardableDungeonIds.Count > 0
+                && definition.ClearRewardGroups.Count > 0;
 
         internal static SequentialDungeonDefinitionCatalog Parse(
             string text,

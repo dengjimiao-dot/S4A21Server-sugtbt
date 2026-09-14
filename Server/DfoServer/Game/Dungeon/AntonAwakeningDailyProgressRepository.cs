@@ -10,6 +10,9 @@ namespace DfoServer.Game.Dungeon
 {
     internal sealed class AntonAwakeningDailyProgressRepository
     {
+        private const string LegacyMarkerKey =
+            "anton_awakening_progress_initialized";
+
         private readonly IGameDatabase _database;
         private readonly DailyResetService _dailyReset;
 
@@ -120,6 +123,50 @@ namespace DfoServer.Game.Dungeon
             {
                 throw new InvalidOperationException(
                     $"Invalid Anton Awakening daily progress marker value: {marker}.");
+            }
+
+            // Deployments before the ETC catalog used a single legacy marker.
+            // Migrate it only while it is still valid for this game day and
+            // only when the catalog can identify one Anton awakening definition.
+            var legacyMarker = 0L;
+            if (SequentialDungeonDefinitionCatalog.Current
+                .IsUniqueAntonAwakeningDefinition(definition))
+            {
+                legacyMarker = _dailyReset.GetCounter(
+                    connection,
+                    transaction,
+                    characterId,
+                    LegacyMarkerKey,
+                    DailyResetService.PeriodDay,
+                    utcNow);
+                if (legacyMarker != 0 && legacyMarker != 1)
+                {
+                    throw new InvalidOperationException(
+                        $"Invalid legacy Anton Awakening daily progress marker value: {legacyMarker}.");
+                }
+            }
+
+            if (legacyMarker == 1)
+            {
+                if (!_dailyReset.TryClaimFlag(
+                        connection,
+                        transaction,
+                        characterId,
+                        markerKey,
+                        DailyResetService.PeriodDay,
+                        utcNow)
+                    || _dailyReset.GetCounter(
+                        connection,
+                        transaction,
+                        characterId,
+                        markerKey,
+                        DailyResetService.PeriodDay,
+                        utcNow) != 1)
+                {
+                    throw new InvalidOperationException(
+                        "Unable to migrate the legacy Anton Awakening daily progress marker.");
+                }
+                return;
             }
 
             using (var command = connection.CreateCommand())

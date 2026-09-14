@@ -3913,6 +3913,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                 if (anton.Allowed)
                     return true;
 
+                if (anton.Status == AntonAwakeningAdmissionStatus.InvalidState)
+                {
+                    validation = new EntryCostResult().Fail(
+                        "anton awakening admission is ambiguous",
+                        EntryCostFailureKind.InvalidState);
+                    return false;
+                }
+
                 validation = new EntryCostResult().Fail(
                     "anton awakening prerequisites missing="
                         + string.Join(",", anton.MissingDungeonIds),
