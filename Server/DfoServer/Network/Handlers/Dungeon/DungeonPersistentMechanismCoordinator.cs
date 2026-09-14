@@ -15,7 +15,6 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         internal DungeonPersistentMechanismCoordinator(
             SqliteCharacterStateRepository characterStateRepository,
-            AntonAwakeningDailyLootGuard antonLootGuard = null,
             AntonAwakeningDailyProgressService awakeningProgress = null)
         {
             _antonNormal = new AntonNormalConquestNotifier(

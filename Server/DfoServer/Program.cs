@@ -63,6 +63,7 @@ namespace DfoServer
             ("--selftest-friends", SelfTests.UnitedFriendSystemSelfTest.Run),
             ("--selftest-pvf-map-monster-parsing", SelfTests.PvfMapMonsterParsingSelfTest.Run),
             ("--selftest-sequential-dungeon-definition", SelfTests.SequentialDungeonDefinitionCatalogSelfTest.Run),
+            ("--selftest-sequential-dungeon-daily-loot", SelfTests.SequentialDungeonDailyLootSelfTest.Run),
             ("--selftest-sequential-dungeon-info-protocol", SelfTests.SequentialDungeonInfoProtocolSelfTest.Run),
             ("--selftest-licensed-dungeon", SelfTests.LicensedDungeonSelfTest.Run),
             ("--selftest-anton-awakening-daily-reset", SelfTests.AntonAwakeningDailyResetSelfTest.Run),

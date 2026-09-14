@@ -921,22 +921,14 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
             else
             {
-                var skipAntonLoot = AntonAwakeningDailyLootGuard
-                    .IsAntonAwakeningDungeon(run.DungeonId)
-                    && _services.AntonLootGuard.HasClaimedLootToday(
-                        session.Player.CharacterId,
-                        run.DungeonId);
-                if (skipAntonLoot)
-                {
-                    generatedDrops = Array.Empty<DropInfo>();
-                    goldGained = 0;
-                }
-                else
-                {
-                    var dropRateLevel = run.HellMode
-                        ? dungeonBasisLevel
-                        : monster.Level;
-                    var dropResult = _services.Drops.GenerateAndRegister(
+                var dropRateLevel = run.HellMode
+                    ? dungeonBasisLevel
+                    : monster.Level;
+                var dropResult = _services.SequentialLoot.GenerateAndMark(
+                    session.Player.CharacterId,
+                    run.Instance?.SequentialDefinition,
+                    monster.Code,
+                    () => _services.Drops.GenerateAndRegister(
                         run,
                         new MonsterDropRequest
                         {
@@ -944,10 +936,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                             MonsterType = rewardMonsterType,
                             MonsterCode = monster.Code,
                             DungeonBasisLevel = dungeonBasisLevel,
-                        });
-                    generatedDrops = dropResult.Drops;
-                    goldGained = dropResult.GoldAmount;
-                }
+                        }),
+                    drops => _services.Drops.RollbackRegistered(run, drops));
+                generatedDrops = dropResult.Drops;
+                goldGained = dropResult.GoldAmount;
             }
 
             ExperienceGrantResult grant = null;

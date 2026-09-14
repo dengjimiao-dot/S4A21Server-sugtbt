@@ -27,7 +27,6 @@ namespace DfoServer.SelfTests
         {
             Console.WriteLine("=== ANTON_AWAKENING_DAILY_RESET selftest ===");
             var failures = 0;
-            VerifyLootCounters(ref failures);
             VerifyRewardPoolParser(ref failures);
             VerifyTwoStageRewardResolution(ref failures);
             VerifyMalformedRewardPoolsFailClosed(ref failures);
@@ -40,24 +39,6 @@ namespace DfoServer.SelfTests
                     ? "ANTON_AWAKENING_DAILY_RESET selftest passed."
                     : $"ANTON_AWAKENING_DAILY_RESET selftest failed: {failures}");
             return failures == 0 ? 0 : 1;
-        }
-
-        private static void VerifyLootCounters(ref int failures)
-        {
-            failures += WithDatabase(
-                "loot",
-                (database, dailyReset, characterId) =>
-                {
-                    var localFailures = 0;
-                    var guard = new AntonAwakeningDailyLootGuard(dailyReset);
-                    Check("243 first loot mark succeeds", guard.TryMarkLootClaimed(characterId, 243), ref localFailures);
-                    Check("243 duplicate loot mark is rejected", !guard.TryMarkLootClaimed(characterId, 243), ref localFailures);
-                    Check("244 has an independent counter", guard.TryMarkLootClaimed(characterId, 244), ref localFailures);
-                    Check("243 reports claimed", guard.HasClaimedLootToday(characterId, 243), ref localFailures);
-                    Check("245 reports unclaimed", !guard.HasClaimedLootToday(characterId, 245), ref localFailures);
-                    Check("non-Anton dungeons are ignored", !guard.TryMarkLootClaimed(characterId, 999), ref localFailures);
-                    return localFailures;
-                });
         }
 
         private static void VerifyRewardPoolParser(ref int failures)
