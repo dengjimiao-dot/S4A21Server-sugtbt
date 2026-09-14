@@ -110,6 +110,11 @@ namespace DfoServer.Game.Dungeon
             DateTime utcNow)
         {
             var markerKey = BuildMarkerKey(definition.GroupKey);
+            var hasCurrentDayAnchor = HasCurrentDayAnchor(
+                connection,
+                transaction,
+                characterId,
+                utcNow);
             var marker = _dailyReset.GetCounter(
                 connection,
                 transaction,
@@ -129,7 +134,8 @@ namespace DfoServer.Game.Dungeon
             // Migrate it only while it is still valid for this game day and
             // only when the catalog can identify one Anton awakening definition.
             var legacyMarker = 0L;
-            if (SequentialDungeonDefinitionCatalog.Current
+            if (hasCurrentDayAnchor
+                && SequentialDungeonDefinitionCatalog.Current
                 .IsUniqueAntonAwakeningDefinition(definition))
             {
                 legacyMarker = _dailyReset.GetCounter(
@@ -345,6 +351,28 @@ ORDER BY sort_order;";
                 }
             }
             return result;
+        }
+
+        private static bool HasCurrentDayAnchor(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            int characterId,
+            DateTime utcNow)
+        {
+            using (var command = connection.CreateCommand())
+            {
+                command.Transaction = transaction;
+                command.CommandText = @"
+SELECT day_id
+FROM character_daily_reset
+WHERE character_id = @cid;";
+                command.Parameters.AddWithValue("@cid", characterId);
+                var value = command.ExecuteScalar();
+                return value != null
+                    && value != DBNull.Value
+                    && Convert.ToInt32(value)
+                        == DailyResetService.TodayId(utcNow);
+            }
         }
 
         internal static string BuildMarkerKey(int groupKey)

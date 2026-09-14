@@ -147,9 +147,9 @@ namespace DfoServer.SelfTests
                     ref failures);
                 if (currentAntonDefinition != null)
                 {
-                    repository.EnsureCurrentDayAndLoad(
+                    SeedDailyResetAnchor(
+                        database,
                         migrationCharacter,
-                        currentAntonDefinition,
                         beforeUtc);
                     SeedPermission(database, migrationCharacter, 243, 3);
                     SeedCounter(
@@ -168,9 +168,9 @@ namespace DfoServer.SelfTests
                         && ReadMarker(database, migrationCharacter, currentAntonDefinition.GroupKey) == 1,
                         ref failures);
 
-                    repository.EnsureCurrentDayAndLoad(
+                    SeedDailyResetAnchor(
+                        database,
                         staleLegacyCharacter,
-                        currentAntonDefinition,
                         beforeUtc);
                     SeedPermission(database, staleLegacyCharacter, 243, 3);
                     SeedCounter(
@@ -772,6 +772,28 @@ WHERE character_id = @cid
                         AntonAwakeningDailyProgressRepository.BuildMarkerKey(
                             groupKey));
                     return Convert.ToInt64(command.ExecuteScalar() ?? 0L);
+                }
+            });
+        }
+
+        private static void SeedDailyResetAnchor(
+            GameDatabase database,
+            int characterId,
+            DateTime utcNow)
+        {
+            database.Write((connection, transaction) =>
+            {
+                using (var command = connection.CreateCommand())
+                {
+                    command.Transaction = transaction;
+                    command.CommandText = @"
+INSERT INTO character_daily_reset (character_id, day_id, week_id)
+VALUES (@cid, @day, 0);";
+                    command.Parameters.AddWithValue("@cid", characterId);
+                    command.Parameters.AddWithValue(
+                        "@day",
+                        DailyResetService.TodayId(utcNow));
+                    command.ExecuteNonQuery();
                 }
             });
         }
