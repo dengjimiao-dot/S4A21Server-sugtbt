@@ -354,6 +354,7 @@ namespace DfoServer.Game.Dungeon
         private static IReadOnlyList<AntonNormalSequence> LoadSequences()
         {
             return SequentialDungeonDefinitionCatalog.Current.Definitions
+                .Where(definition => definition.IsAntonDungeonSequence)
                 .Select(definition => new AntonNormalSequence(definition))
                 .ToList()
                 .AsReadOnly();

@@ -49,6 +49,7 @@ namespace DfoServer.GameWorld
         internal SequentialDungeonDefinition(
             int groupKey,
             byte difficulty,
+            bool isAntonDungeonSequence,
             IEnumerable<int> dungeonIds,
             IEnumerable<int> monsterIds,
             bool showIndividualProcess,
@@ -133,6 +134,7 @@ namespace DfoServer.GameWorld
 
             GroupKey = groupKey;
             Difficulty = difficulty;
+            IsAntonDungeonSequence = isAntonDungeonSequence;
             ShowIndividualProcess = showIndividualProcess;
             _dungeonIds = copiedDungeonIds.AsReadOnly();
             _prerequisiteDungeonIds = prerequisites.AsReadOnly();
@@ -146,6 +148,7 @@ namespace DfoServer.GameWorld
 
         internal int GroupKey { get; }
         internal byte Difficulty { get; }
+        internal bool IsAntonDungeonSequence { get; }
         internal IReadOnlyList<int> DungeonIds => _dungeonIds;
         internal IReadOnlyList<int> PrerequisiteDungeonIds =>
             _prerequisiteDungeonIds;
@@ -326,15 +329,35 @@ namespace DfoServer.GameWorld
         internal static SequentialDungeonDefinitionCatalog Parse(
             string text,
             Func<IReadOnlyList<int>, byte?> difficultyResolver)
-            => Parse(text, difficultyResolver, DefinitionPath);
+            => Parse(
+                text,
+                difficultyResolver,
+                _ => false,
+                DefinitionPath);
+
+        internal static SequentialDungeonDefinitionCatalog Parse(
+            string text,
+            Func<IReadOnlyList<int>, byte?> difficultyResolver,
+            Func<IReadOnlyList<int>, bool> antonDungeonSequenceResolver)
+            => Parse(
+                text,
+                difficultyResolver,
+                antonDungeonSequenceResolver,
+                DefinitionPath);
 
         private static SequentialDungeonDefinitionCatalog Parse(
             string text,
             Func<IReadOnlyList<int>, byte?> difficultyResolver,
+            Func<IReadOnlyList<int>, bool> antonDungeonSequenceResolver,
             string sourcePath)
         {
             if (difficultyResolver == null)
                 throw new ArgumentNullException(nameof(difficultyResolver));
+            if (antonDungeonSequenceResolver == null)
+            {
+                throw new ArgumentNullException(
+                    nameof(antonDungeonSequenceResolver));
+            }
             sourcePath = string.IsNullOrWhiteSpace(sourcePath)
                 ? DefinitionPath
                 : sourcePath;
@@ -394,6 +417,7 @@ namespace DfoServer.GameWorld
                         text,
                         groupKey,
                         difficultyResolver,
+                        antonDungeonSequenceResolver,
                         out var definition,
                         out var field,
                         out var reason))
@@ -425,6 +449,17 @@ namespace DfoServer.GameWorld
             string sourcePath,
             Func<string, string> readText,
             Func<IReadOnlyList<int>, byte?> difficultyResolver)
+            => Load(
+                sourcePath,
+                readText,
+                difficultyResolver,
+                _ => false);
+
+        internal static SequentialDungeonDefinitionCatalog Load(
+            string sourcePath,
+            Func<string, string> readText,
+            Func<IReadOnlyList<int>, byte?> difficultyResolver,
+            Func<IReadOnlyList<int>, bool> antonDungeonSequenceResolver)
         {
             if (string.IsNullOrWhiteSpace(sourcePath))
                 throw new ArgumentException(
@@ -434,12 +469,18 @@ namespace DfoServer.GameWorld
                 throw new ArgumentNullException(nameof(readText));
             if (difficultyResolver == null)
                 throw new ArgumentNullException(nameof(difficultyResolver));
+            if (antonDungeonSequenceResolver == null)
+            {
+                throw new ArgumentNullException(
+                    nameof(antonDungeonSequenceResolver));
+            }
 
             try
             {
                 var catalog = Parse(
                     readText(sourcePath),
                     difficultyResolver,
+                    antonDungeonSequenceResolver,
                     sourcePath);
                 foreach (var definition in catalog.Definitions)
                 {
@@ -476,7 +517,8 @@ namespace DfoServer.GameWorld
             Load(
                 DefinitionPath,
                 PvfArchiveAccessor.ReadText,
-                ResolveDifficulty);
+                ResolveDifficulty,
+                ResolveAntonDungeonSequence);
 
         private static byte? ResolveDifficulty(
             IReadOnlyList<int> dungeonIds)
@@ -504,11 +546,38 @@ namespace DfoServer.GameWorld
                     : null;
         }
 
+        private static bool ResolveAntonDungeonSequence(
+            IReadOnlyList<int> dungeonIds)
+        {
+            if (dungeonIds == null || dungeonIds.Count == 0)
+                return false;
+
+            foreach (var dungeonId in dungeonIds)
+            {
+                try
+                {
+                    var dungeon = Dungeon.GetDungeonFile(dungeonId);
+                    if (dungeon == null
+                        || !dungeon.HasTag("anton dungeon"))
+                    {
+                        return false;
+                    }
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         private static bool TryParseDefinition(
             ScriptNode section,
             string text,
             int groupKey,
             Func<IReadOnlyList<int>, byte?> difficultyResolver,
+            Func<IReadOnlyList<int>, bool> antonDungeonSequenceResolver,
             out SequentialDungeonDefinition definition,
             out string field,
             out string reason)
@@ -587,11 +656,12 @@ namespace DfoServer.GameWorld
                 return false;
             }
 
+            var readOnlyDungeonIds =
+                new ReadOnlyCollection<int>(dungeonIds);
             byte? difficulty;
             try
             {
-                difficulty = difficultyResolver(
-                    new ReadOnlyCollection<int>(dungeonIds));
+                difficulty = difficultyResolver(readOnlyDungeonIds);
             }
             catch (Exception ex)
             {
@@ -607,11 +677,25 @@ namespace DfoServer.GameWorld
                 return false;
             }
 
+            bool isAntonDungeonSequence;
+            try
+            {
+                isAntonDungeonSequence = antonDungeonSequenceResolver(
+                    readOnlyDungeonIds);
+            }
+            catch (Exception ex)
+            {
+                field = "Anton dungeon classification";
+                reason = "resolution failed: " + ex.Message;
+                return false;
+            }
+
             try
             {
                 definition = new SequentialDungeonDefinition(
                     groupKey,
                     difficulty.Value,
+                    isAntonDungeonSequence,
                     dungeonIds,
                     monsterIds,
                     showIndividualProcess,

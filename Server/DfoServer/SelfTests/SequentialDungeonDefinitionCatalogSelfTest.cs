@@ -74,6 +74,7 @@ namespace DfoServer.SelfTests
             var definition = new SequentialDungeonDefinition(
                 1,
                 0,
+                true,
                 sourceDungeonIds,
                 Array.Empty<int>(),
                 showIndividualProcess: false,
@@ -84,13 +85,15 @@ namespace DfoServer.SelfTests
             sourceDungeonIds[0] = 99;
             Check(
                 "definition copies caller-owned collections",
-                definition.DungeonIds.SequenceEqual(new[] { 10, 11 }),
+                definition.IsAntonDungeonSequence
+                && definition.DungeonIds.SequenceEqual(new[] { 10, 11 }),
                 ref failures);
             Check(
                 "definition rejects a non-positive group key",
                 ThrowsArgument(() => new SequentialDungeonDefinition(
                     0,
                     0,
+                    false,
                     new[] { 10 },
                     Array.Empty<int>(),
                     false,
@@ -104,6 +107,7 @@ namespace DfoServer.SelfTests
                 ThrowsArgument(() => new SequentialDungeonDefinition(
                     1,
                     0,
+                    false,
                     new[] { 10, 10 },
                     Array.Empty<int>(),
                     false,
@@ -117,6 +121,7 @@ namespace DfoServer.SelfTests
                 ThrowsArgument(() => new SequentialDungeonDefinition(
                     1,
                     0,
+                    false,
                     Enumerable.Range(1, 32),
                     Array.Empty<int>(),
                     false,
@@ -139,12 +144,18 @@ namespace DfoServer.SelfTests
         private static void VerifyEtcProjectionAndIndexes(ref int failures)
         {
             IReadOnlyList<int> resolvedDungeonIds = null;
+            var classifiedDungeonIds = new List<IReadOnlyList<int>>();
             var catalog = SequentialDungeonDefinitionCatalog.Parse(
                 OverlappingConfig,
                 dungeonIds =>
                 {
                     resolvedDungeonIds = dungeonIds.ToArray();
                     return (byte)2;
+                },
+                dungeonIds =>
+                {
+                    classifiedDungeonIds.Add(dungeonIds.ToArray());
+                    return dungeonIds.Count == 5;
                 });
             var foundByKey = catalog.TryGetByGroupKey(41, out var byKey);
 
@@ -163,6 +174,18 @@ namespace DfoServer.SelfTests
                     new[] { 243, 244, 245, 246, 247 })
                 && byKey != null
                 && byKey.Difficulty == 2,
+                ref failures);
+            Check(
+                "classification resolver freezes typed Anton capability",
+                classifiedDungeonIds.Count == 2
+                && classifiedDungeonIds[0].SequenceEqual(
+                    new[] { 225, 243, 244, 245, 246, 247 })
+                && classifiedDungeonIds[1].SequenceEqual(
+                    new[] { 243, 244, 245, 246, 247 })
+                && catalog.TryGetByGroupKey(28, out var generic)
+                && !generic.IsAntonDungeonSequence
+                && byKey != null
+                && byKey.IsAntonDungeonSequence,
                 ref failures);
             Check(
                 "show-individual definition resolves overlap",
@@ -532,6 +555,7 @@ namespace DfoServer.SelfTests
             Check(
                 "current PVF publishes key 41",
                 foundCurrent
+                && current.IsAntonDungeonSequence
                 && current.RewardableDungeonIds.Contains(247)
                 && current.MonsterIds.Count == 19
                 && current.ClearRewardGroups.Count == 4,
@@ -543,11 +567,31 @@ namespace DfoServer.SelfTests
                 && sequence.ConfigKey == current.GroupKey
                 && sequence.DungeonIds.SequenceEqual(current.DungeonIds),
                 ref failures);
+            Check(
+                "Anton conquest keeps only DGN-tagged ETC definitions",
+                AntonNormalConquest.TryGetSequenceByKey(28, out _)
+                && AntonNormalConquest.TryGetSequenceByKey(41, out _)
+                && !AntonNormalConquest.TryGetSequenceByKey(105, out _)
+                && !AntonNormalConquest.TryGetSequence(4108, out _),
+                ref failures);
 
             var instance = new DungeonInstance(247, 0);
             Check(
                 "dungeon instance freezes primary sequential definition",
                 ReferenceEquals(instance.SequentialDefinition, current),
+                ref failures);
+
+            var foundNonAnton = SequentialDungeonDefinitionCatalog.Current
+                .TryGetByGroupKey(105, out var nonAnton);
+            var nonAntonInstance = new DungeonInstance(4108, 0);
+            Check(
+                "generic catalog still freezes a non-Anton definition",
+                foundNonAnton
+                && !nonAnton.IsAntonDungeonSequence
+                && nonAnton.DungeonIds.Contains(4108)
+                && ReferenceEquals(
+                    nonAntonInstance.SequentialDefinition,
+                    nonAnton),
                 ref failures);
         }
 
