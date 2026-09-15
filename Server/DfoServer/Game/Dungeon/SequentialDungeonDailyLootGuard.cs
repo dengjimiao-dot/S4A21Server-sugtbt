@@ -33,7 +33,10 @@ namespace DfoServer.Game.Dungeon
             SequentialDungeonDefinition definition,
             int monsterId,
             Func<MonsterDropResult> generate,
-            Action<IReadOnlyList<DropInfo>> rollback)
+            Action<IReadOnlyList<DropInfo>> rollback,
+            int dungeonId = 0,
+            DungeonRunIdentity runIdentity = default,
+            Guid sourceEventId = default)
         {
             if (generate == null)
                 throw new ArgumentNullException(nameof(generate));
@@ -56,7 +59,10 @@ namespace DfoServer.Game.Dungeon
                     definition?.GroupKey ?? 0,
                     monsterId,
                     "resolve-definition",
-                    definitionResolution.ToString());
+                    definitionResolution.ToString(),
+                    dungeonId,
+                    runIdentity,
+                    sourceEventId);
                 return EmptyResult();
             }
 
@@ -70,7 +76,10 @@ namespace DfoServer.Game.Dungeon
                     definition.GroupKey,
                     monsterId,
                     "validate",
-                    "invalid character id");
+                    "invalid character id",
+                    dungeonId,
+                    runIdentity,
+                    sourceEventId);
                 return EmptyResult();
             }
 
@@ -85,11 +94,26 @@ namespace DfoServer.Game.Dungeon
             {
                 try
                 {
-                    if (_dailyReset.GetCounter(
+                    if (!_dailyReset.TryGetCounter(
                             characterId,
                             counterKey,
                             DailyResetService.PeriodDay,
-                            utcNow) > 0)
+                            utcNow,
+                            out var currentCount))
+                    {
+                        LogFailure(
+                            characterId,
+                            definition.GroupKey,
+                            monsterId,
+                            "read-counter",
+                            "stale time anchor",
+                            dungeonId,
+                            runIdentity,
+                            sourceEventId);
+                        return EmptyResult();
+                    }
+
+                    if (currentCount > 0)
                     {
                         return EmptyResult();
                     }
@@ -101,7 +125,10 @@ namespace DfoServer.Game.Dungeon
                         definition.GroupKey,
                         monsterId,
                         "read-counter",
-                        ex.Message);
+                        ex.Message,
+                        dungeonId,
+                        runIdentity,
+                        sourceEventId);
                     return EmptyResult();
                 }
 
@@ -117,7 +144,10 @@ namespace DfoServer.Game.Dungeon
                         definition.GroupKey,
                         monsterId,
                         "generate",
-                        ex.Message);
+                        ex.Message,
+                        dungeonId,
+                        runIdentity,
+                        sourceEventId);
                     throw;
                 }
 
@@ -144,7 +174,10 @@ namespace DfoServer.Game.Dungeon
                         characterId,
                         definition.GroupKey,
                         monsterId,
-                        "claim-rejected");
+                        "claim-rejected",
+                        dungeonId,
+                        runIdentity,
+                        sourceEventId);
                     return EmptyResult();
                 }
                 catch (Exception ex)
@@ -155,13 +188,19 @@ namespace DfoServer.Game.Dungeon
                         characterId,
                         definition.GroupKey,
                         monsterId,
-                        "claim-exception");
+                        "claim-exception",
+                        dungeonId,
+                        runIdentity,
+                        sourceEventId);
                     LogFailure(
                         characterId,
                         definition.GroupKey,
                         monsterId,
                         "claim-counter",
-                        ex.Message);
+                        ex.Message,
+                        dungeonId,
+                        runIdentity,
+                        sourceEventId);
                     return EmptyResult();
                 }
             }
@@ -198,7 +237,10 @@ namespace DfoServer.Game.Dungeon
             int characterId,
             int groupKey,
             int monsterId,
-            string stage)
+            string stage,
+            int dungeonId,
+            DungeonRunIdentity runIdentity,
+            Guid sourceEventId)
         {
             try
             {
@@ -211,7 +253,10 @@ namespace DfoServer.Game.Dungeon
                     groupKey,
                     monsterId,
                     stage + "-rollback",
-                    ex.Message);
+                    ex.Message,
+                    dungeonId,
+                    runIdentity,
+                    sourceEventId);
             }
         }
 
@@ -226,12 +271,19 @@ namespace DfoServer.Game.Dungeon
             int groupKey,
             int monsterId,
             string stage,
-            string error)
+            string error,
+            int dungeonId = 0,
+            DungeonRunIdentity runIdentity = default,
+            Guid sourceEventId = default)
         {
             FileLogger.Log(
                 "[SequentialDungeonDailyLoot] "
                 + $"character={characterId} group={groupKey} "
-                + $"monster={monsterId} stage={Sanitize(stage)} "
+                + $"dungeon={dungeonId} monster={monsterId} "
+                + $"instance={runIdentity.PartyDungeonInstanceId} "
+                + $"run={runIdentity.RunId} "
+                + $"generation={runIdentity.RunGeneration} "
+                + $"event={sourceEventId:N} stage={Sanitize(stage)} "
                 + $"error={Sanitize(error)}");
         }
 

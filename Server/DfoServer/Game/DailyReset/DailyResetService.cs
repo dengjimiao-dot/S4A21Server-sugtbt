@@ -5,6 +5,12 @@ using Microsoft.Data.Sqlite;
 
 namespace DfoServer.Game.DailyReset
 {
+    internal enum DailyResetAnchorStatus
+    {
+        Current = 0,
+        Stale = 1,
+    }
+
     // 每日/周常重置: character_daily_reset 只做门控(该角色周期状态属于哪天/哪周),
     // 全部状态存 character_daily_counters 账本(一功能一 key)。布尔标记 = cap=1 的计数器。
     // 日界 = 北京时间 06:00(凌晨0-6点算前一天); 周界 = ISO 周一 06:00。
@@ -139,12 +145,25 @@ CREATE INDEX IF NOT EXISTS idx_character_usable_count_limits_character_day
         // 原子递增: value < cap 时 +1 并返回 true; 已达上限返回 false。跨天/周自动先归零。
         // 典型用法(每日3次+道具补充): cap = 3 + GetCounter(extraKey), 补充道具时 AddCounter(extraKey, 1)。
         public bool TryIncrementCounter(int characterId, string key, int cap, string period = PeriodDay)
-            => TryIncrementCounter(
-                characterId,
-                key,
-                cap,
-                period,
-                DateTime.UtcNow);
+        {
+            using (var conn = new SqliteConnection(_connectionString))
+            {
+                conn.Open();
+                using (var tx = conn.BeginTransaction())
+                {
+                    var allowed = TryIncrementCounter(
+                        conn,
+                        tx,
+                        characterId,
+                        key,
+                        cap,
+                        period,
+                        DateTime.UtcNow);
+                    tx.Commit();
+                    return allowed;
+                }
+            }
+        }
 
         internal bool TryIncrementCounter(
             int characterId,
@@ -196,7 +215,14 @@ CREATE INDEX IF NOT EXISTS idx_character_usable_count_limits_character_day
             if (cap <= 0)
                 return false;
 
-            EnsureRowAndRollover(conn, tx, characterId, utcNow);
+            if (EnsureRowAndRollover(
+                    conn,
+                    tx,
+                    characterId,
+                    utcNow) == DailyResetAnchorStatus.Stale)
+            {
+                return false;
+            }
             using (var cmd = conn.CreateCommand())
             {
                 cmd.Transaction = tx;
@@ -227,7 +253,13 @@ ON CONFLICT (character_id, counter_key) DO UPDATE SET value = value + 1 WHERE va
             if (characterId <= 0 || string.IsNullOrWhiteSpace(key) || delta < 0 || cap < 0 || delta > cap)
                 return false;
 
-            EnsureRowAndRollover(conn, tx, characterId);
+            if (EnsureRowAndRollover(
+                    conn,
+                    tx,
+                    characterId) == DailyResetAnchorStatus.Stale)
+            {
+                return false;
+            }
             if (delta == 0)
                 return true;
 
@@ -267,7 +299,14 @@ WHERE character_daily_counters.period = @period
         public void AddCounter(SqliteConnection conn, SqliteTransaction tx, int characterId, string key, int delta, string period = PeriodDay)
         {
             ValidatePeriod(period);
-            EnsureRowAndRollover(conn, tx, characterId);
+            if (EnsureRowAndRollover(
+                    conn,
+                    tx,
+                    characterId) == DailyResetAnchorStatus.Stale)
+            {
+                throw new InvalidOperationException(
+                    "daily counter anchor is older than the persisted reset period");
+            }
             using (var cmd = conn.CreateCommand())
             {
                 cmd.Transaction = tx;
@@ -284,17 +323,6 @@ ON CONFLICT (character_id, counter_key) DO UPDATE SET value = value + @delta;";
         }
 
         public long GetCounter(int characterId, string key)
-            => GetCounter(
-                characterId,
-                key,
-                period: null,
-                utcNow: DateTime.UtcNow);
-
-        internal long GetCounter(
-            int characterId,
-            string key,
-            string period,
-            DateTime utcNow)
         {
             using (var conn = new SqliteConnection(_connectionString))
             {
@@ -306,10 +334,55 @@ ON CONFLICT (character_id, counter_key) DO UPDATE SET value = value + @delta;";
                         tx,
                         characterId,
                         key,
-                        period,
-                        utcNow);
-                    tx.Commit();   // 归零结果落库
+                        period: null,
+                        utcNow: DateTime.UtcNow);
+                    tx.Commit();
                     return value;
+                }
+            }
+        }
+
+        internal long GetCounter(
+            int characterId,
+            string key,
+            string period,
+            DateTime utcNow)
+        {
+            if (!TryGetCounter(
+                    characterId,
+                    key,
+                    period,
+                    utcNow,
+                    out var value))
+            {
+                throw new InvalidOperationException(
+                    "daily counter anchor is older than the persisted reset period");
+            }
+            return value;
+        }
+
+        internal bool TryGetCounter(
+            int characterId,
+            string key,
+            string period,
+            DateTime utcNow,
+            out long value)
+        {
+            using (var conn = new SqliteConnection(_connectionString))
+            {
+                conn.Open();
+                using (var tx = conn.BeginTransaction())
+                {
+                    var current = TryGetCounter(
+                        conn,
+                        tx,
+                        characterId,
+                        key,
+                        period,
+                        utcNow,
+                        out value);
+                    tx.Commit();   // 归零结果落库
+                    return current;
                 }
             }
         }
@@ -331,9 +404,41 @@ ON CONFLICT (character_id, counter_key) DO UPDATE SET value = value + @delta;";
             string period,
             DateTime utcNow)
         {
+            if (!TryGetCounter(
+                    conn,
+                    tx,
+                    characterId,
+                    key,
+                    period,
+                    utcNow,
+                    out var value))
+            {
+                throw new InvalidOperationException(
+                    "daily counter anchor is older than the persisted reset period");
+            }
+            return value;
+        }
+
+        internal bool TryGetCounter(
+            SqliteConnection conn,
+            SqliteTransaction tx,
+            int characterId,
+            string key,
+            string period,
+            DateTime utcNow,
+            out long value)
+        {
+            value = 0;
             if (period != null)
                 ValidatePeriod(period);
-            EnsureRowAndRollover(conn, tx, characterId, utcNow);
+            if (EnsureRowAndRollover(
+                    conn,
+                    tx,
+                    characterId,
+                    utcNow) == DailyResetAnchorStatus.Stale)
+            {
+                return false;
+            }
             using (var cmd = conn.CreateCommand())
             {
                 cmd.Transaction = tx;
@@ -348,7 +453,8 @@ WHERE character_id = @cid
                 cmd.Parameters.AddWithValue(
                     "@period",
                     period == null ? DBNull.Value : period);
-                return Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
+                value = Convert.ToInt64(cmd.ExecuteScalar() ?? 0L);
+                return true;
             }
         }
 
@@ -503,14 +609,14 @@ WHERE character_id IN (
 
         // 建行(不存在时) + 跨天/跨周归零: 删除对应周期的计数行(删行=归零) + 拨门控。
         // 语句各自原子, 同一事务内执行; DELETE 必须先于对应门控 UPDATE(靠旧 day_id/week_id 判断过期)。
-        private static void EnsureRowAndRollover(SqliteConnection conn, SqliteTransaction tx, int characterId)
+        private static DailyResetAnchorStatus EnsureRowAndRollover(SqliteConnection conn, SqliteTransaction tx, int characterId)
             => EnsureRowAndRollover(
                 conn,
                 tx,
                 characterId,
                 DateTime.UtcNow);
 
-        private static void EnsureRowAndRollover(
+        private static DailyResetAnchorStatus EnsureRowAndRollover(
             SqliteConnection conn,
             SqliteTransaction tx,
             int characterId,
@@ -523,22 +629,63 @@ WHERE character_id IN (
             {
                 cmd.Transaction = tx;
                 cmd.CommandText = @"
-INSERT OR IGNORE INTO character_daily_reset (character_id, day_id, week_id) VALUES (@cid, @today, @week);
-DELETE FROM character_daily_counters
-WHERE character_id = @cid AND period = 'day'
-  AND EXISTS (SELECT 1 FROM character_daily_reset r WHERE r.character_id = @cid AND r.day_id <> @today);
-UPDATE character_daily_reset SET day_id = @today
-WHERE character_id = @cid AND day_id <> @today;
-DELETE FROM character_daily_counters
-WHERE character_id = @cid AND period = 'week'
-  AND EXISTS (SELECT 1 FROM character_daily_reset r WHERE r.character_id = @cid AND r.week_id <> @week);
-UPDATE character_daily_reset SET week_id = @week
-WHERE character_id = @cid AND week_id <> @week;";
+INSERT OR IGNORE INTO character_daily_reset (character_id, day_id, week_id)
+VALUES (@cid, @today, @week);";
                 cmd.Parameters.AddWithValue("@cid", characterId);
                 cmd.Parameters.AddWithValue("@today", today);
                 cmd.Parameters.AddWithValue("@week", week);
                 cmd.ExecuteNonQuery();
             }
+
+            int storedDay;
+            int storedWeek;
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = @"
+SELECT day_id, week_id
+FROM character_daily_reset
+WHERE character_id = @cid;";
+                cmd.Parameters.AddWithValue("@cid", characterId);
+                using (var reader = cmd.ExecuteReader())
+                {
+                    if (!reader.Read())
+                    {
+                        throw new InvalidOperationException(
+                            "character daily reset row could not be established");
+                    }
+
+                    storedDay = reader.GetInt32(0);
+                    storedWeek = reader.GetInt32(1);
+                }
+            }
+
+            if (storedDay > today || storedWeek > week)
+                return DailyResetAnchorStatus.Stale;
+
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+                cmd.CommandText = @"
+DELETE FROM character_daily_counters
+WHERE character_id = @cid AND period = 'day'
+  AND @storedDay < @today;
+UPDATE character_daily_reset SET day_id = @today
+WHERE character_id = @cid AND day_id = @storedDay AND @storedDay < @today;
+DELETE FROM character_daily_counters
+WHERE character_id = @cid AND period = 'week'
+  AND @storedWeek < @week;
+UPDATE character_daily_reset SET week_id = @week
+WHERE character_id = @cid AND week_id = @storedWeek AND @storedWeek < @week;";
+                cmd.Parameters.AddWithValue("@cid", characterId);
+                cmd.Parameters.AddWithValue("@today", today);
+                cmd.Parameters.AddWithValue("@week", week);
+                cmd.Parameters.AddWithValue("@storedDay", storedDay);
+                cmd.Parameters.AddWithValue("@storedWeek", storedWeek);
+                cmd.ExecuteNonQuery();
+            }
+
+            return DailyResetAnchorStatus.Current;
         }
 
         private static bool EnsureAccountSchema(SqliteConnection conn, SqliteTransaction tx)

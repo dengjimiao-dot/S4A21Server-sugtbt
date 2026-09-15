@@ -1,6 +1,7 @@
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Progression;
+using DfoServer.GameWorld;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Handlers.Pets;
@@ -169,7 +170,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                     context,
                     run,
                     canonicalWorldDeath,
-                    canonicalDynamicActor);
+                    canonicalDynamicActor,
+                    reservation);
                 if (!completed)
                 {
                     run.Instance.ParticipantEffects.TryFail(reservation);
@@ -304,7 +306,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             KillContext context,
             DungeonRun run,
             DungeonRoomActorDeathApplication? recordedWorldDeath = null,
-            DungeonDynamicActorDefinition dynamicActor = null)
+            DungeonDynamicActorDefinition dynamicActor = null,
+            DungeonParticipantEffectReservation participantEffect = default)
         {
             var session = context.Session;
 
@@ -368,6 +371,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                     session,
                     run,
                     identity,
+                    context.Envelope.SourceEventId,
+                    participantEffect,
                     context.SequenceId,
                     monster.Value);
                 if (!session.Player.IsCurrentDungeonRun(identity))
@@ -392,6 +397,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                         session,
                         run,
                         identity,
+                        context.Envelope.SourceEventId,
+                        participantEffect,
                         context.SequenceId,
                         new DungeonData.MonsterSumInfo
                         {
@@ -745,6 +752,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             EnhancedClientSession session,
             DungeonRun run,
             DungeonRunIdentity identity,
+            Guid sourceEventId,
+            DungeonParticipantEffectReservation participantEffect,
             ushort sequenceId,
             DungeonData.MonsterSumInfo monster,
             DungeonDynamicActorPolicy dynamicPolicy = null)
@@ -895,6 +904,10 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             IReadOnlyList<DropInfo> generatedDrops;
             int goldGained;
+            var monsterDropIdentity = new DungeonMonsterDropIdentity(
+                sequenceId,
+                monster.Code);
+            var reusesClaimedSequentialOutcome = false;
             if (!allowsDrops)
             {
                 generatedDrops = Array.Empty<DropInfo>();
@@ -924,21 +937,88 @@ namespace DfoServer.Network.Handlers.Dungeon
                 var dropRateLevel = run.HellMode
                     ? dungeonBasisLevel
                     : monster.Level;
-                var dropResult = _services.SequentialLoot.GenerateAndMark(
-                    session.Player.CharacterId,
-                    run.Instance.SequentialDefinitionResolution,
-                    run.Instance.SequentialDefinition,
-                    monster.Code,
-                    () => _services.Drops.GenerateAndRegister(
-                        run,
-                        new MonsterDropRequest
+                var isLimitedSequentialMonster =
+                    run.Instance.SequentialDefinitionResolution
+                        == SequentialDungeonCapabilityResolution.Resolved
+                    && run.Instance.SequentialDefinition != null
+                    && run.Instance.SequentialDefinition.ContainsMonster(
+                        monster.Code);
+                var dropResult = default(MonsterDropResult);
+                if (isLimitedSequentialMonster)
+                {
+                    DungeonMonsterDropOutcomeResolution outcomeResolution;
+                    outcomeResolution = run.Instance.ParticipantEffects
+                        .ResolveMonsterDropOutcome(
+                            participantEffect,
+                            monsterDropIdentity,
+                            out dropResult);
+
+                    if (outcomeResolution
+                        == DungeonMonsterDropOutcomeResolution.IdentityMismatch)
+                    {
+                        throw new InvalidOperationException(
+                            "Sequential monster drop event was replayed with a different monster identity.");
+                    }
+                    reusesClaimedSequentialOutcome = outcomeResolution
+                        == DungeonMonsterDropOutcomeResolution.Claimed;
+                }
+
+                if (!reusesClaimedSequentialOutcome)
+                {
+                    dropResult = _services.SequentialLoot.GenerateAndMark(
+                        session.Player.CharacterId,
+                        run.Instance.SequentialDefinitionResolution,
+                        run.Instance.SequentialDefinition,
+                        monster.Code,
+                        () => _services.Drops.GenerateAndRegister(
+                            run,
+                            new MonsterDropRequest
+                            {
+                                DropRateLevel = dropRateLevel,
+                                MonsterType = rewardMonsterType,
+                                MonsterCode = monster.Code,
+                                DungeonBasisLevel = dungeonBasisLevel,
+                            }),
+                        drops => _services.Drops.RollbackRegistered(run, drops),
+                        run.DungeonId,
+                        identity,
+                        sourceEventId);
+
+                    if (isLimitedSequentialMonster
+                        && HasGeneratedDropValue(dropResult))
+                    {
+                        if (!run.Instance.ParticipantEffects
+                                .TryFreezeMonsterDropOutcome(
+                                    participantEffect,
+                                    monsterDropIdentity,
+                                    dropResult,
+                                    out dropResult))
                         {
-                            DropRateLevel = dropRateLevel,
-                            MonsterType = rewardMonsterType,
-                            MonsterCode = monster.Code,
-                            DungeonBasisLevel = dungeonBasisLevel,
-                        }),
-                    drops => _services.Drops.RollbackRegistered(run, drops));
+                            throw new InvalidOperationException(
+                                "Sequential monster drop result could not be frozen after its durable claim.");
+                        }
+                        reusesClaimedSequentialOutcome = true;
+                        LogSequentialDropOutcome(
+                            "frozen",
+                            session.Player.CharacterId,
+                            run,
+                            identity,
+                            sourceEventId,
+                            monsterDropIdentity,
+                            dropResult);
+                    }
+                }
+                else
+                {
+                    LogSequentialDropOutcome(
+                        "reused",
+                        session.Player.CharacterId,
+                        run,
+                        identity,
+                        sourceEventId,
+                        monsterDropIdentity,
+                        dropResult);
+                }
                 generatedDrops = dropResult.Drops;
                 goldGained = dropResult.GoldAmount;
             }
@@ -965,7 +1045,22 @@ namespace DfoServer.Network.Handlers.Dungeon
                     isNamed,
                     actorSequenceId: sequenceId,
                     equipmentBonusExperience: equipmentBonus);
-                run.TotalGold = checked(run.TotalGold + goldGained);
+                if (reusesClaimedSequentialOutcome)
+                {
+                    if (!run.Instance.ParticipantEffects.TryApplyMonsterDropGold(
+                            participantEffect,
+                            monsterDropIdentity,
+                            amount => run.TotalGold = checked(
+                                run.TotalGold + amount)))
+                    {
+                        throw new InvalidOperationException(
+                            "Sequential monster drop gold checkpoint lost its frozen outcome.");
+                    }
+                }
+                else
+                {
+                    run.TotalGold = checked(run.TotalGold + goldGained);
+                }
             }
 
             if (allowsExperience)
@@ -1008,6 +1103,30 @@ namespace DfoServer.Network.Handlers.Dungeon
             }
 
             return generatedDrops;
+        }
+
+        private static bool HasGeneratedDropValue(MonsterDropResult result) =>
+            (result.Drops?.Count ?? 0) > 0 || result.GoldAmount > 0;
+
+        private static void LogSequentialDropOutcome(
+            string stage,
+            int characterId,
+            DungeonRun run,
+            DungeonRunIdentity identity,
+            Guid sourceEventId,
+            DungeonMonsterDropIdentity monsterIdentity,
+            MonsterDropResult result)
+        {
+            FileLogger.Log(
+                "[SequentialDungeonDailyLoot] "
+                + $"stage={stage} character={characterId} "
+                + $"group={run.Instance.SequentialDefinition?.GroupKey ?? 0} "
+                + $"dungeon={run.DungeonId} monster={monsterIdentity.MonsterCode} "
+                + $"actor={monsterIdentity.ActorSequenceId} "
+                + $"instance={identity.PartyDungeonInstanceId} "
+                + $"run={identity.RunId} generation={identity.RunGeneration} "
+                + $"event={sourceEventId:N} drops={result.Drops?.Count ?? 0} "
+                + $"gold={result.GoldAmount}");
         }
 
         private async Task ApplyRoomClearedAsync(

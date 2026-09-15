@@ -3,6 +3,39 @@ using System.Collections.Generic;
 
 namespace DfoServer.Game.Dungeon
 {
+    internal readonly struct DungeonMonsterDropIdentity
+        : IEquatable<DungeonMonsterDropIdentity>
+    {
+        internal DungeonMonsterDropIdentity(
+            ushort actorSequenceId,
+            int monsterCode)
+        {
+            ActorSequenceId = actorSequenceId;
+            MonsterCode = monsterCode;
+        }
+
+        internal ushort ActorSequenceId { get; }
+        internal int MonsterCode { get; }
+        internal bool IsValid => ActorSequenceId > 0 && MonsterCode > 0;
+
+        public bool Equals(DungeonMonsterDropIdentity other) =>
+            ActorSequenceId == other.ActorSequenceId
+            && MonsterCode == other.MonsterCode;
+
+        public override bool Equals(object obj) =>
+            obj is DungeonMonsterDropIdentity other && Equals(other);
+
+        public override int GetHashCode() =>
+            HashCode.Combine(ActorSequenceId, MonsterCode);
+    }
+
+    internal enum DungeonMonsterDropOutcomeResolution
+    {
+        Absent = 0,
+        Claimed = 1,
+        IdentityMismatch = 2,
+    }
+
     internal enum DungeonParticipantEffectState
     {
         Pending = 0,
@@ -188,6 +221,14 @@ namespace DfoServer.Game.Dungeon
         {
             internal DungeonParticipantEffectState State;
             internal Guid LeaseId;
+            internal DungeonMonsterDropOutcome MonsterDropOutcome;
+        }
+
+        private sealed class DungeonMonsterDropOutcome
+        {
+            internal DungeonMonsterDropIdentity MonsterIdentity;
+            internal MonsterDropResult Result;
+            internal bool GoldApplied;
         }
 
         private sealed class EventEntry
@@ -308,11 +349,13 @@ namespace DfoServer.Game.Dungeon
                 }
 
                 var leaseId = Guid.NewGuid();
-                eventEntry.Effects[key] = new EffectEntry
+                if (existing == null)
                 {
-                    State = DungeonParticipantEffectState.InFlight,
-                    LeaseId = leaseId,
-                };
+                    existing = new EffectEntry();
+                    eventEntry.Effects.Add(key, existing);
+                }
+                existing.State = DungeonParticipantEffectState.InFlight;
+                existing.LeaseId = leaseId;
                 reservation = new DungeonParticipantEffectReservation(
                     sourceEventId,
                     audience,
@@ -320,6 +363,101 @@ namespace DfoServer.Game.Dungeon
                     effectKind,
                     leaseId);
                 state = DungeonParticipantEffectState.InFlight;
+                return true;
+            }
+        }
+
+        // A successful durable cap-one claim may outlive the network attempt
+        // which created it. Keep its immutable drop result on the existing
+        // participant kill effect so Failed -> TryBegin recovery can replay the
+        // same scene slots without rerunning the generator.
+        internal DungeonMonsterDropOutcomeResolution ResolveMonsterDropOutcome(
+            DungeonParticipantEffectReservation reservation,
+            DungeonMonsterDropIdentity monsterIdentity,
+            out MonsterDropResult result)
+        {
+            result = default;
+            lock (_syncRoot)
+            {
+                if (!monsterIdentity.IsValid
+                    || !TryGetEntry(reservation, out var entry))
+                {
+                    return DungeonMonsterDropOutcomeResolution.IdentityMismatch;
+                }
+                if (entry.MonsterDropOutcome == null)
+                    return DungeonMonsterDropOutcomeResolution.Absent;
+                if (!entry.MonsterDropOutcome.MonsterIdentity.Equals(
+                        monsterIdentity))
+                {
+                    return DungeonMonsterDropOutcomeResolution.IdentityMismatch;
+                }
+
+                result = CopyMonsterDropResult(
+                    entry.MonsterDropOutcome.Result);
+                return DungeonMonsterDropOutcomeResolution.Claimed;
+            }
+        }
+
+        internal bool TryFreezeMonsterDropOutcome(
+            DungeonParticipantEffectReservation reservation,
+            DungeonMonsterDropIdentity monsterIdentity,
+            MonsterDropResult result,
+            out MonsterDropResult frozen)
+        {
+            frozen = default;
+            if (!monsterIdentity.IsValid || !HasGeneratedValue(result))
+                return false;
+
+            lock (_syncRoot)
+            {
+                if (!TryGetEntry(reservation, out var entry))
+                    return false;
+                if (entry.MonsterDropOutcome != null)
+                {
+                    if (!entry.MonsterDropOutcome.MonsterIdentity.Equals(
+                            monsterIdentity))
+                    {
+                        return false;
+                    }
+                    frozen = CopyMonsterDropResult(
+                        entry.MonsterDropOutcome.Result);
+                    return true;
+                }
+
+                frozen = CopyMonsterDropResult(result);
+                entry.MonsterDropOutcome = new DungeonMonsterDropOutcome
+                {
+                    MonsterIdentity = monsterIdentity,
+                    Result = CopyMonsterDropResult(frozen),
+                };
+                return true;
+            }
+        }
+
+        internal bool TryApplyMonsterDropGold(
+            DungeonParticipantEffectReservation reservation,
+            DungeonMonsterDropIdentity monsterIdentity,
+            Action<int> apply)
+        {
+            if (apply == null)
+                throw new ArgumentNullException(nameof(apply));
+
+            lock (_syncRoot)
+            {
+                if (!TryGetEntry(reservation, out var entry)
+                    || entry.MonsterDropOutcome == null
+                    || !entry.MonsterDropOutcome.MonsterIdentity.Equals(
+                        monsterIdentity))
+                {
+                    return false;
+                }
+                if (entry.MonsterDropOutcome.GoldApplied)
+                    return true;
+
+                // Mark only after the checked caller mutation succeeds. An
+                // overflow or other exception leaves the checkpoint retryable.
+                apply(entry.MonsterDropOutcome.Result.GoldAmount);
+                entry.MonsterDropOutcome.GoldApplied = true;
                 return true;
             }
         }
@@ -473,6 +611,31 @@ namespace DfoServer.Game.Dungeon
                        out entry)
                 && entry.State == DungeonParticipantEffectState.InFlight
                 && entry.LeaseId == reservation.LeaseId;
+        }
+
+        private static bool HasGeneratedValue(MonsterDropResult result) =>
+            (result.Drops?.Count ?? 0) > 0 || result.GoldAmount > 0;
+
+        private static MonsterDropResult CopyMonsterDropResult(
+            MonsterDropResult source)
+        {
+            var drops = new List<DropInfo>(source.Drops?.Count ?? 0);
+            if (source.Drops != null)
+            {
+                foreach (var sourceDrop in source.Drops)
+                {
+                    var copy = sourceDrop;
+                    if (sourceDrop.Core != null)
+                        copy.Core = sourceDrop.Core.Copy();
+                    drops.Add(copy);
+                }
+            }
+
+            return new MonsterDropResult
+            {
+                GoldAmount = source.GoldAmount,
+                Drops = drops,
+            };
         }
 
         private static IReadOnlyList<DungeonParticipantRosterEntry> NormalizeRoster(
