@@ -2454,6 +2454,21 @@ namespace DfoServer.SelfTests
                     ExpNotificationBuilder.RemovedChannelExpOffset) == 0,
                 ref failures);
 
+            var altHonor = new DfoServer.Game.Accounts.HonorLevelSummary
+            {
+                HonorLevel = 7,
+                HonorExp = 1234,
+            };
+            var altExp = ExpNotificationBuilder.Build(
+                level: 50,
+                totalExp: 456,
+                skillPoints: default,
+                honorLevel: altHonor);
+            Check(
+                "A21 non-max-level EXP preserves account honor instead of resetting it to zero",
+                BitConverter.ToUInt32(altExp, ExpNotificationBuilder.HonorLevelOffset) == altHonor.HonorLevel
+                && BitConverter.ToUInt32(altExp, ExpNotificationBuilder.HonorExpOffset) == altHonor.HonorExp,
+                ref failures);
             var eliteExp = ExpNotificationBuilder.Build(
                 level: 1,
                 totalExp: 100,
