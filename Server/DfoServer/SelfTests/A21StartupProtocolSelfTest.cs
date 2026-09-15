@@ -18,6 +18,7 @@ namespace DfoServer.SelfTests
         {
             Console.WriteLine("=== A21_STARTUP_PROTOCOL selftest ===");
             var failures = 0;
+            CheckPvpGradeProjection(ref failures);
 
             Check(
                 "A21 cmd/noti table sizes are 1271/1218",
@@ -996,6 +997,36 @@ INSERT INTO characters(character_id, account_id, name, job) VALUES(9612, 9611, '
             }
 
             return offset == body.Length;
+        }
+
+        private static void CheckPvpGradeProjection(ref int failures)
+        {
+            var player = new DfoServer.Game.Session.PlayerContext
+            {
+                Subtype0Tail = new UserInfoMinimumTailSnapshot(),
+                AppearanceEntries = new[]
+                {
+                    new CharacterAppearanceEntry(0, 100, 4, new byte[4], 0, 0, 0, 0),
+                },
+            };
+            foreach (var (grade, rating) in new[] { (1, 0), (10, 0), (20, 4), (0, 0) })
+            {
+                var record = new CharacterRecord
+                {
+                    CharacterId = 32000,
+                    Name = Encoding.ASCII.GetBytes("pvprank"),
+                    Level = 86,
+                    PvpGrade = (byte)grade,
+                    PvpRatingGrade = (byte)rating,
+                };
+                player.HydrateIdentityFrom(record);
+                var body = DfoServer.Game.Appearance.AppearanceService.BuildNoti2Body(player);
+                var fields = 47 + record.Name.Length;
+                Check(
+                    $"A21 appearance refresh preserves hydrated PvP grade/rating {grade}/{rating}",
+                    body[fields + 3] == grade && body[fields + 4] == rating,
+                    ref failures);
+            }
         }
 
         private static byte[] BuildUserInfo1PrefixForSelfTest(
