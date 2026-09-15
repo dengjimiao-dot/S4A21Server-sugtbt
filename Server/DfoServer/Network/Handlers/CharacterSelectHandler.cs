@@ -602,7 +602,7 @@ namespace DfoServer.Network.Handlers
             {
                 // body = {u16 targetUserId, u8 mode}，允许 padding。
                 // 城镇查看基本信息用 mode=3，只回一个 USERINFO subtype 3。
-                // mode 0/1 仍按目标查；mode 2 回请求者名册。
+                // mode 0/1 仍按目标查；mode 2 回请求者名册；mode 5 查询改名记录。
                 // 无效、过期、歧义或跨频道目标直接失败。
                 if (_sessions == null || body == null || body.Length < 3)
                 {
@@ -621,7 +621,8 @@ namespace DfoServer.Network.Handlers
                 if (mode != 0x00
                     && mode != 0x01
                     && mode != 0x02
-                    && mode != 0x03)
+                    && mode != 0x03
+                    && mode != 0x05)
                 {
                     FileLogger.Log(
                         $"[{ProtocolName}] GET_USERINFO rejected " +
