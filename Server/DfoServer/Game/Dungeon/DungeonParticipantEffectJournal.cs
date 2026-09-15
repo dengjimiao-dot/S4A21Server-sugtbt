@@ -32,7 +32,7 @@ namespace DfoServer.Game.Dungeon
     internal enum DungeonMonsterDropOutcomeResolution
     {
         Absent = 0,
-        Claimed = 1,
+        Resolved = 1,
         IdentityMismatch = 2,
     }
 
@@ -367,10 +367,10 @@ namespace DfoServer.Game.Dungeon
             }
         }
 
-        // A successful durable cap-one claim may outlive the network attempt
-        // which created it. Keep its immutable drop result on the existing
-        // participant kill effect so Failed -> TryBegin recovery can replay the
-        // same scene slots without rerunning the generator.
+        // A completed drop decision may outlive the network attempt which
+        // created it. Keep its immutable result, including an empty result, on
+        // the existing participant kill effect so Failed -> TryBegin recovery
+        // can replay the same decision without rerunning the guard or generator.
         internal DungeonMonsterDropOutcomeResolution ResolveMonsterDropOutcome(
             DungeonParticipantEffectReservation reservation,
             DungeonMonsterDropIdentity monsterIdentity,
@@ -394,7 +394,7 @@ namespace DfoServer.Game.Dungeon
 
                 result = CopyMonsterDropResult(
                     entry.MonsterDropOutcome.Result);
-                return DungeonMonsterDropOutcomeResolution.Claimed;
+                return DungeonMonsterDropOutcomeResolution.Resolved;
             }
         }
 
@@ -405,7 +405,7 @@ namespace DfoServer.Game.Dungeon
             out MonsterDropResult frozen)
         {
             frozen = default;
-            if (!monsterIdentity.IsValid || !HasGeneratedValue(result))
+            if (!monsterIdentity.IsValid)
                 return false;
 
             lock (_syncRoot)
@@ -612,9 +612,6 @@ namespace DfoServer.Game.Dungeon
                 && entry.State == DungeonParticipantEffectState.InFlight
                 && entry.LeaseId == reservation.LeaseId;
         }
-
-        private static bool HasGeneratedValue(MonsterDropResult result) =>
-            (result.Drops?.Count ?? 0) > 0 || result.GoldAmount > 0;
 
         private static MonsterDropResult CopyMonsterDropResult(
             MonsterDropResult source)

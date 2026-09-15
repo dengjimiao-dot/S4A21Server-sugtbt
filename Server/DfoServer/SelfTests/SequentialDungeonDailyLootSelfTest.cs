@@ -22,6 +22,7 @@ namespace DfoServer.SelfTests
         private const int CharacterId = 57901;
         private const int MonsterA = 56675;
         private const int MonsterB = 56678;
+        private const int RecoveryMonster = 123456789;
 
         public static int Run()
         {
@@ -40,6 +41,7 @@ namespace DfoServer.SelfTests
             VerifyRegisteredDropRollbackIsExact(ref failures);
             VerifyClaimedOutcomeJournalCheckpoints(ref failures);
             VerifyClaimedOutcomeReplaysThroughKillRecovery(ref failures);
+            VerifyEmptyOutcomeReplaysThroughKillRecovery(ref failures);
 
             Console.WriteLine(
                 failures == 0
@@ -838,120 +840,54 @@ namespace DfoServer.SelfTests
                 (database, dailyReset) =>
                 {
                     var localFailures = 0;
-                    var sessions = new SessionDirectory();
-                    using (var runtime = new ServerRuntimeBuilder(database))
-                    {
-                        var core = runtime.GetOrCreateGameProtocolCoreDependencies();
-                        var inventory = runtime
-                            .GetOrCreateGameProtocolInventoryDependencies(core);
-                        var world = runtime.GetOrCreateGameProtocolWorldDependencies(
-                            sessions,
-                            core);
-                        var handler = runtime
-                            .GetOrCreateGameProtocolTownDungeonHandlers(
-                                core,
-                                inventory,
-                                world)
-                            .Dungeon;
+                    var observed = RunKillRecoveryScenario(
+                        database,
+                        FindGoldDropSeed());
+                    Check(
+                        "a claimed sequential outcome is replayed through the real kill recovery chain without rerolling or double gold",
+                        observed.SendFailed
+                            && observed.FirstDrops.Length > 0
+                            && observed.FirstGold > 0
+                            && observed.RecoveredDie != null
+                            && PacketMatchesDrops(
+                                observed.RecoveredDie,
+                                observed.FirstDrops)
+                            && observed.FinalSceneSlot == observed.FirstSceneSlot
+                            && observed.FinalGold == observed.FirstGold
+                            && observed.FinalRandomSeed == observed.FirstRandomSeed
+                            && observed.DailyCounter == 1,
+                        ref localFailures);
 
-                        var definitionCatalog =
-                            SequentialDungeonDefinitionCatalog.Parse(
-                                $@"
-[sequential dungeon]
-99
-[dungeon index check]
-243
-[/dungeon index check]
-[monster index check]
-{MonsterA}
-[/monster index check]
-[show individual process]
-[/show individual process]
-[/sequential dungeon]",
-                                _ => (byte)2);
-                        var instance = new DungeonInstance(
-                            dungeonId: 243,
-                            difficulty: 2,
-                            sequentialCatalog: definitionCatalog);
-                        var run = new DungeonRun(
-                            instance,
-                            runId: 7901,
-                            runGeneration: 1,
-                            DungeonRunState.Active)
-                        {
-                            Phase = DungeonRunPhase.InProgress,
-                        };
-                        var seed = FindGoldDropSeed();
-                        AttachRoom(run, seed);
+                    return localFailures;
+                });
+        }
 
-                        using (var disconnectedClient = new TcpClient())
-                        {
-                            var disconnected = new EnhancedClientSession(
-                                disconnectedClient,
-                                new GamePacketHeader());
-                            ConfigureSession(disconnected, run);
-                            sessions.Register(CharacterId, disconnected);
-
-                            var sendFailed = false;
-                            try
-                            {
-                                handler.Handle_ENUM_CMDPACKET_DIE_MONSTER(
-                                        disconnected,
-                                        new GamePacketHeader(),
-                                        BitConverter.GetBytes((ushort)100))
-                                    .GetAwaiter()
-                                    .GetResult();
-                            }
-                            catch (InvalidOperationException)
-                            {
-                                sendFailed = true;
-                            }
-
-                            var originallyRegistered = run.Drops.Values
-                                .OrderBy(drop => drop.SceneSlot)
-                                .ToArray();
-                            var originalGold = run.TotalGold;
-                            var originalSceneSlotCounter = run.SceneSlotCounter;
-
-                            using (var capture = new LoopbackPacketCapture())
-                            {
-                                ConfigureSession(capture.Session, run);
-                                sessions.Register(CharacterId, capture.Session);
-                                handler.RecoverDungeonParticipantEffectsAsync(
-                                        capture.Session)
-                                    .GetAwaiter()
-                                    .GetResult();
-                                var packets = capture.ReadPackets(
-                                    minimumCount: 1);
-                                var recoveredDie = packets.LastOrDefault(
-                                    packet => IsPacket(
-                                        packet,
-                                        command: 0x00,
-                                        type: (ushort)NotiPacketTypeA21
-                                            .DIE_MONSTER));
-
-                                Check(
-                                    "a claimed sequential outcome is replayed through the real kill recovery chain without rerolling or double gold",
-                                    sendFailed
-                                        && originallyRegistered.Length > 0
-                                        && originalGold > 0
-                                        && recoveredDie != null
-                                        && PacketMatchesDrops(
-                                            recoveredDie,
-                                            originallyRegistered)
-                                        && run.SceneSlotCounter
-                                            == originalSceneSlotCounter
-                                        && run.TotalGold == originalGold
-                                        && ReadCounterDirect(
-                                            database,
-                                            SequentialDungeonDailyLootGuard
-                                                .BuildCounterKey(99, MonsterA))
-                                            == 1,
-                                    ref localFailures);
-                            }
-                        }
-                    }
-
+        private static void VerifyEmptyOutcomeReplaysThroughKillRecovery(
+            ref int failures)
+        {
+            failures += WithDatabase(
+                "kill-recovery-empty",
+                (database, dailyReset) =>
+                {
+                    var localFailures = 0;
+                    var observed = RunKillRecoveryScenario(
+                        database,
+                        FindEmptyDropSeed());
+                    Check(
+                        "an empty sequential outcome is replayed through the real kill recovery chain without rerolling",
+                        observed.SendFailed
+                            && observed.FirstDrops.Length == 0
+                            && observed.FirstGold == 0
+                            && observed.FirstSceneSlot == 0
+                            && observed.RecoveredDie != null
+                            && PacketMatchesDrops(
+                                observed.RecoveredDie,
+                                Array.Empty<DropInfo>())
+                            && observed.FinalSceneSlot == 0
+                            && observed.FinalGold == 0
+                            && observed.FinalRandomSeed == observed.FirstRandomSeed
+                            && observed.DailyCounter == 0,
+                        ref localFailures);
                     return localFailures;
                 });
         }
@@ -998,15 +934,39 @@ namespace DfoServer.SelfTests
                 DungeonParticipantEffectKinds.MonsterKill,
                 out var reservation,
                 out _);
+            var emptySourceEventId = Guid.NewGuid();
+            var emptyIdentity = new DungeonMonsterDropIdentity(69, MonsterA);
+            var emptySource = new DungeonEventEnvelope(
+                emptySourceEventId,
+                run.CaptureIdentity(),
+                roomIdentity.RoomInstanceId,
+                CharacterId,
+                CharacterId,
+                emptyIdentity.ActorSequenceId,
+                emptyIdentity.MonsterCode,
+                "sequential-loot-empty-selftest",
+                1);
+            journal.TryFreeze(
+                emptySource,
+                DungeonParticipantEffectAudience.Room,
+                new[] { participant },
+                out _);
+            var emptyBegan = journal.TryBegin(
+                emptySourceEventId,
+                DungeonParticipantEffectAudience.Room,
+                participant,
+                DungeonParticipantEffectKinds.MonsterKill,
+                out var emptyReservation,
+                out _);
             var emptyFrozen = journal.TryFreezeMonsterDropOutcome(
-                reservation,
-                identity,
+                emptyReservation,
+                emptyIdentity,
                 EmptyResult(),
                 out _);
             var emptyResolution = journal.ResolveMonsterDropOutcome(
-                reservation,
-                identity,
-                out _);
+                emptyReservation,
+                emptyIdentity,
+                out var emptyReplay);
 
             var claimed = new MonsterDropResult
             {
@@ -1072,11 +1032,14 @@ namespace DfoServer.SelfTests
             var committed = journal.TryCommit(retryReservation);
 
             Check(
-                "empty or failed outcomes are not frozen as claimed",
+                "empty outcomes are frozen as resolved without inventing a drop",
                 began
-                    && !emptyFrozen
+                    && emptyBegan
+                    && emptyFrozen
                     && emptyResolution
-                        == DungeonMonsterDropOutcomeResolution.Absent,
+                        == DungeonMonsterDropOutcomeResolution.Resolved
+                    && emptyReplay.Drops?.Count == 0
+                    && emptyReplay.GoldAmount == 0,
                 ref failures);
             Check(
                 "a source event cannot reuse a claimed outcome for another monster identity",
@@ -1084,7 +1047,7 @@ namespace DfoServer.SelfTests
                     && failed
                     && retried
                     && replayed
-                        == DungeonMonsterDropOutcomeResolution.Claimed
+                        == DungeonMonsterDropOutcomeResolution.Resolved
                     && replayedResult.Drops?.Count == 1
                     && replayedResult.Drops[0].TemplateId == 90401
                     && !ReferenceEquals(
@@ -1108,6 +1071,146 @@ namespace DfoServer.SelfTests
                 ref failures);
         }
 
+        private static KillRecoveryObservation RunKillRecoveryScenario(
+            IGameDatabase database,
+            uint seed)
+        {
+            var sessions = new SessionDirectory();
+            using (var runtime = new ServerRuntimeBuilder(database))
+            {
+                var core = runtime.GetOrCreateGameProtocolCoreDependencies();
+                var inventory = runtime
+                    .GetOrCreateGameProtocolInventoryDependencies(core);
+                var world = runtime.GetOrCreateGameProtocolWorldDependencies(
+                    sessions,
+                    core);
+                var handler = runtime
+                    .GetOrCreateGameProtocolTownDungeonHandlers(
+                        core,
+                        inventory,
+                        world)
+                    .Dungeon;
+
+                var definitionCatalog =
+                    SequentialDungeonDefinitionCatalog.Parse(
+                        $@"
+[sequential dungeon]
+99
+[dungeon index check]
+243
+[/dungeon index check]
+[monster index check]
+{RecoveryMonster}
+[/monster index check]
+[show individual process]
+[/show individual process]
+[/sequential dungeon]",
+                        _ => (byte)2);
+                var instance = new DungeonInstance(
+                    dungeonId: 243,
+                    difficulty: 2,
+                    rewardPolicy: DungeonRewardPolicy.Standard,
+                    dropDefinition: new DungeonDropDefinition(
+                        dungeonId: 243,
+                        sharedDungeonId: -1,
+                        impossibleClassification: -1,
+                        sourcePath: "selftest/kill-recovery",
+                        kind: DungeonDropDefinitionKind.ImpossibleSolo,
+                        policy: DungeonDropPolicy.Impossible),
+                    experienceDefinition:
+                        DungeonExperienceDefinitionCatalog.Resolve(243),
+                    sequentialCatalog: definitionCatalog);
+                var run = new DungeonRun(
+                    instance,
+                    runId: 7901,
+                    runGeneration: 1,
+                    DungeonRunState.Active)
+                {
+                    Phase = DungeonRunPhase.InProgress,
+                };
+                AttachRoom(run, seed, RecoveryMonster);
+
+                using (var disconnectedClient = new TcpClient())
+                {
+                    var disconnected = new EnhancedClientSession(
+                        disconnectedClient,
+                        new GamePacketHeader());
+                    ConfigureSession(disconnected, run);
+                    sessions.Register(CharacterId, disconnected);
+
+                    var sendFailed = false;
+                    try
+                    {
+                        handler.Handle_ENUM_CMDPACKET_DIE_MONSTER(
+                                disconnected,
+                                new GamePacketHeader(),
+                                BitConverter.GetBytes((ushort)100))
+                            .GetAwaiter()
+                            .GetResult();
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        sendFailed = true;
+                    }
+
+                    var firstDrops = run.Drops.Values
+                        .OrderBy(drop => drop.SceneSlot)
+                        .ToArray();
+                    var firstGold = run.TotalGold;
+                    var firstSceneSlot = run.SceneSlotCounter;
+                    var firstRandomSeed = run.ParticipantDropLcg.Seed;
+
+                    using (var capture = new LoopbackPacketCapture())
+                    {
+                        ConfigureSession(capture.Session, run);
+                        sessions.Register(CharacterId, capture.Session);
+                        handler.RecoverDungeonParticipantEffectsAsync(
+                                capture.Session)
+                            .GetAwaiter()
+                            .GetResult();
+                        var packets = capture.ReadPackets(minimumCount: 1);
+                        var recoveredDie = packets.LastOrDefault(
+                            packet => IsPacket(
+                                packet,
+                                command: 0x00,
+                                type: (ushort)NotiPacketTypeA21.DIE_MONSTER));
+
+                        return new KillRecoveryObservation
+                        {
+                            SendFailed = sendFailed,
+                            FirstDrops = firstDrops,
+                            FirstGold = firstGold,
+                            FirstSceneSlot = firstSceneSlot,
+                            FirstRandomSeed = firstRandomSeed,
+                            RecoveredDie = recoveredDie,
+                            FinalGold = run.TotalGold,
+                            FinalSceneSlot = run.SceneSlotCounter,
+                            FinalRandomSeed = run.ParticipantDropLcg.Seed,
+                            DailyCounter = ReadCounterDirect(
+                                database,
+                                SequentialDungeonDailyLootGuard.BuildCounterKey(
+                                    99,
+                                    RecoveryMonster)),
+                        };
+                    }
+                }
+            }
+        }
+
+        private sealed class KillRecoveryObservation
+        {
+            internal bool SendFailed;
+            internal DropInfo[] FirstDrops;
+            internal int FirstGold;
+            internal ushort FirstSceneSlot;
+            internal uint FirstRandomSeed;
+            internal byte[] RecoveredDie;
+            internal int FinalGold;
+            internal ushort FinalSceneSlot;
+            internal uint FinalRandomSeed;
+            internal long DailyCounter;
+        }
+
         private static void ConfigureSession(
             EnhancedClientSession session,
             DungeonRun run)
@@ -1126,14 +1229,17 @@ namespace DfoServer.SelfTests
             session.Player.CurrentRun = run;
         }
 
-        private static void AttachRoom(DungeonRun run, uint seed)
+        private static void AttachRoom(
+            DungeonRun run,
+            uint seed,
+            int primaryMonsterCode = MonsterA)
         {
             var roomKey = new RoomKey(0, 0, 0);
             var monsters = new List<DfoServer.GameWorld.Dungeon.MonsterSumInfo>
             {
                 new DfoServer.GameWorld.Dungeon.MonsterSumInfo
                 {
-                    Code = MonsterA,
+                    Code = primaryMonsterCode,
                     Level = 85,
                     Type = 0,
                     IsBlocking = true,
@@ -1193,12 +1299,12 @@ namespace DfoServer.SelfTests
                     .GenerateMonsterDrops(
                         monsterLevel: 85,
                         monsterType: 0,
-                        monsterCode: MonsterA,
+                        monsterCode: RecoveryMonster,
                         difficulty: 2,
                         dungeonLevel: 85,
                         partyMemberCount: 1,
                         chronicleDropJobGroup: -1,
-                        dropPolicy: DungeonDropPolicy.Standard,
+                        dropPolicy: DungeonDropPolicy.Impossible,
                         slotCounter: ref slotCounter);
                 if (result.goldAmount > 0)
                     return seed;
@@ -1206,6 +1312,30 @@ namespace DfoServer.SelfTests
 
             throw new InvalidOperationException(
                 "failed to find a deterministic gold-producing drop seed");
+        }
+
+        private static uint FindEmptyDropSeed()
+        {
+            for (uint seed = 1; seed < 100000; seed++)
+            {
+                var slotCounter = (ushort)0;
+                var result = new DropGenerator(new DnfLcg(seed))
+                    .GenerateMonsterDrops(
+                        monsterLevel: 85,
+                        monsterType: 0,
+                        monsterCode: RecoveryMonster,
+                        difficulty: 2,
+                        dungeonLevel: 85,
+                        partyMemberCount: 1,
+                        chronicleDropJobGroup: -1,
+                        dropPolicy: DungeonDropPolicy.Impossible,
+                        slotCounter: ref slotCounter);
+                if (result.goldAmount == 0 && result.drops.Count == 0)
+                    return seed;
+            }
+
+            throw new InvalidOperationException(
+                "failed to find a deterministic empty drop seed");
         }
 
         private static bool PacketMatchesDrops(

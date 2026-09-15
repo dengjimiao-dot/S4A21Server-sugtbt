@@ -907,7 +907,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             var monsterDropIdentity = new DungeonMonsterDropIdentity(
                 sequenceId,
                 monster.Code);
-            var reusesClaimedSequentialOutcome = false;
+            var reusesFrozenSequentialOutcome = false;
             if (!allowsDrops)
             {
                 generatedDrops = Array.Empty<DropInfo>();
@@ -959,11 +959,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                         throw new InvalidOperationException(
                             "Sequential monster drop event was replayed with a different monster identity.");
                     }
-                    reusesClaimedSequentialOutcome = outcomeResolution
-                        == DungeonMonsterDropOutcomeResolution.Claimed;
+                    reusesFrozenSequentialOutcome = outcomeResolution
+                        == DungeonMonsterDropOutcomeResolution.Resolved;
                 }
 
-                if (!reusesClaimedSequentialOutcome)
+                if (!reusesFrozenSequentialOutcome)
                 {
                     dropResult = _services.SequentialLoot.GenerateAndMark(
                         session.Player.CharacterId,
@@ -984,8 +984,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                         identity,
                         sourceEventId);
 
-                    if (isLimitedSequentialMonster
-                        && HasGeneratedDropValue(dropResult))
+                    if (isLimitedSequentialMonster)
                     {
                         if (!run.Instance.ParticipantEffects
                                 .TryFreezeMonsterDropOutcome(
@@ -995,9 +994,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                                     out dropResult))
                         {
                             throw new InvalidOperationException(
-                                "Sequential monster drop result could not be frozen after its durable claim.");
+                                "Sequential monster drop result could not be frozen after resolution.");
                         }
-                        reusesClaimedSequentialOutcome = true;
+                        reusesFrozenSequentialOutcome = true;
                         LogSequentialDropOutcome(
                             "frozen",
                             session.Player.CharacterId,
@@ -1045,7 +1044,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     isNamed,
                     actorSequenceId: sequenceId,
                     equipmentBonusExperience: equipmentBonus);
-                if (reusesClaimedSequentialOutcome)
+                if (reusesFrozenSequentialOutcome)
                 {
                     if (!run.Instance.ParticipantEffects.TryApplyMonsterDropGold(
                             participantEffect,
@@ -1104,9 +1103,6 @@ namespace DfoServer.Network.Handlers.Dungeon
 
             return generatedDrops;
         }
-
-        private static bool HasGeneratedDropValue(MonsterDropResult result) =>
-            (result.Drops?.Count ?? 0) > 0 || result.GoldAmount > 0;
 
         private static void LogSequentialDropOutcome(
             string stage,
