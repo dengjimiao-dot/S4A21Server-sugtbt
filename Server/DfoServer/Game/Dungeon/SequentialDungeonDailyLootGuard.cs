@@ -15,16 +15,21 @@ namespace DfoServer.Game.Dungeon
     {
         private const int GateCount = 64;
         private readonly DailyResetService _dailyReset;
+        private readonly Func<DateTime> _utcNow;
         private readonly object[] _gates = CreateGates();
 
-        internal SequentialDungeonDailyLootGuard(DailyResetService dailyReset)
+        internal SequentialDungeonDailyLootGuard(
+            DailyResetService dailyReset,
+            Func<DateTime> utcNow = null)
         {
             _dailyReset = dailyReset
                 ?? throw new ArgumentNullException(nameof(dailyReset));
+            _utcNow = utcNow ?? (() => DateTime.UtcNow);
         }
 
         internal MonsterDropResult GenerateAndMark(
             int characterId,
+            SequentialDungeonCapabilityResolution definitionResolution,
             SequentialDungeonDefinition definition,
             int monsterId,
             Func<MonsterDropResult> generate,
@@ -35,7 +40,27 @@ namespace DfoServer.Game.Dungeon
             if (rollback == null)
                 throw new ArgumentNullException(nameof(rollback));
 
-            if (definition == null || !definition.ContainsMonster(monsterId))
+            if (definitionResolution
+                    == SequentialDungeonCapabilityResolution.Absent
+                && definition == null)
+            {
+                return generate();
+            }
+
+            if (definitionResolution
+                    != SequentialDungeonCapabilityResolution.Resolved
+                || definition == null)
+            {
+                LogFailure(
+                    characterId,
+                    definition?.GroupKey ?? 0,
+                    monsterId,
+                    "resolve-definition",
+                    definitionResolution.ToString());
+                return EmptyResult();
+            }
+
+            if (!definition.ContainsMonster(monsterId))
                 return generate();
 
             if (characterId <= 0)
@@ -49,6 +74,7 @@ namespace DfoServer.Game.Dungeon
                 return EmptyResult();
             }
 
+            var utcNow = _utcNow();
             var counterKey = BuildCounterKey(
                 definition.GroupKey,
                 monsterId);
@@ -59,8 +85,14 @@ namespace DfoServer.Game.Dungeon
             {
                 try
                 {
-                    if (_dailyReset.GetCounter(characterId, counterKey) > 0)
+                    if (_dailyReset.GetCounter(
+                            characterId,
+                            counterKey,
+                            DailyResetService.PeriodDay,
+                            utcNow) > 0)
+                    {
                         return EmptyResult();
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -86,7 +118,7 @@ namespace DfoServer.Game.Dungeon
                         monsterId,
                         "generate",
                         ex.Message);
-                    return EmptyResult();
+                    throw;
                 }
 
                 var generatedDrops = (IReadOnlyList<DropInfo>)generated.Drops
@@ -100,7 +132,8 @@ namespace DfoServer.Game.Dungeon
                             characterId,
                             counterKey,
                             cap: 1,
-                            period: DailyResetService.PeriodDay))
+                            period: DailyResetService.PeriodDay,
+                            utcNow: utcNow))
                     {
                         return generated;
                     }

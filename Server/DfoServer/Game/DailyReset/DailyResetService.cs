@@ -139,13 +139,33 @@ CREATE INDEX IF NOT EXISTS idx_character_usable_count_limits_character_day
         // 原子递增: value < cap 时 +1 并返回 true; 已达上限返回 false。跨天/周自动先归零。
         // 典型用法(每日3次+道具补充): cap = 3 + GetCounter(extraKey), 补充道具时 AddCounter(extraKey, 1)。
         public bool TryIncrementCounter(int characterId, string key, int cap, string period = PeriodDay)
+            => TryIncrementCounter(
+                characterId,
+                key,
+                cap,
+                period,
+                DateTime.UtcNow);
+
+        internal bool TryIncrementCounter(
+            int characterId,
+            string key,
+            int cap,
+            string period,
+            DateTime utcNow)
         {
             using (var conn = new SqliteConnection(_connectionString))
             {
                 conn.Open();
                 using (var tx = conn.BeginTransaction())
                 {
-                    var allowed = TryIncrementCounter(conn, tx, characterId, key, cap, period);
+                    var allowed = TryIncrementCounter(
+                        conn,
+                        tx,
+                        characterId,
+                        key,
+                        cap,
+                        period,
+                        utcNow);
                     tx.Commit();
                     return allowed;
                 }
@@ -264,13 +284,30 @@ ON CONFLICT (character_id, counter_key) DO UPDATE SET value = value + @delta;";
         }
 
         public long GetCounter(int characterId, string key)
+            => GetCounter(
+                characterId,
+                key,
+                period: null,
+                utcNow: DateTime.UtcNow);
+
+        internal long GetCounter(
+            int characterId,
+            string key,
+            string period,
+            DateTime utcNow)
         {
             using (var conn = new SqliteConnection(_connectionString))
             {
                 conn.Open();
                 using (var tx = conn.BeginTransaction())
                 {
-                    var value = GetCounter(conn, tx, characterId, key);
+                    var value = GetCounter(
+                        conn,
+                        tx,
+                        characterId,
+                        key,
+                        period,
+                        utcNow);
                     tx.Commit();   // 归零结果落库
                     return value;
                 }

@@ -926,7 +926,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                     : monster.Level;
                 var dropResult = _services.SequentialLoot.GenerateAndMark(
                     session.Player.CharacterId,
-                    run.Instance?.SequentialDefinition,
+                    run.Instance.SequentialDefinitionResolution,
+                    run.Instance.SequentialDefinition,
                     monster.Code,
                     () => _services.Drops.GenerateAndRegister(
                         run,

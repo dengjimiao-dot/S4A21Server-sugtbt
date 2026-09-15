@@ -22,7 +22,10 @@ namespace DfoServer.SelfTests
             VerifyGeneratedResultClaims(ref failures);
             VerifyEmptyAndIndependentKeys(ref failures);
             VerifyDurableAndDailyRollover(ref failures);
+            VerifyGenerationKeepsStartingGameDay(ref failures);
+            VerifyAmbiguousDefinitionFailsClosed(ref failures);
             VerifyClaimFailureRollsBack(ref failures);
+            VerifyGenerationExceptionPropagates(ref failures);
             VerifyRegisteredDropRollbackIsExact(ref failures);
 
             Console.WriteLine(
@@ -45,6 +48,7 @@ namespace DfoServer.SelfTests
 
                     var itemOnly = guard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         definition,
                         MonsterA,
                         () => ItemResult(10, 90001),
@@ -52,6 +56,7 @@ namespace DfoServer.SelfTests
                     var duplicateGenerated = false;
                     var duplicate = guard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         definition,
                         MonsterA,
                         () =>
@@ -62,6 +67,7 @@ namespace DfoServer.SelfTests
                         drops => rolledBack.AddRange(drops));
                     var goldOnly = guard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         definition,
                         MonsterB,
                         () => new MonsterDropResult
@@ -117,6 +123,7 @@ namespace DfoServer.SelfTests
 
                     var empty = guard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         firstDefinition,
                         MonsterA,
                         EmptyResult,
@@ -129,6 +136,7 @@ namespace DfoServer.SelfTests
                             MonsterA)) == 0;
                     var multiItem = guard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         firstDefinition,
                         MonsterA,
                         () => new MonsterDropResult
@@ -142,6 +150,7 @@ namespace DfoServer.SelfTests
                         _ => { });
                     var mixed = guard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         firstDefinition,
                         MonsterB,
                         () => new MonsterDropResult
@@ -155,12 +164,14 @@ namespace DfoServer.SelfTests
                         _ => { });
                     var otherGroup = guard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         otherDefinition,
                         MonsterA,
                         () => ItemResult(23, 90014),
                         _ => { });
                     var nonConfigured = guard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         firstDefinition,
                         monsterId: 99999,
                         generate: () => ItemResult(24, 90015),
@@ -224,6 +235,7 @@ namespace DfoServer.SelfTests
                         dailyReset);
                     firstGuard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         definition,
                         MonsterA,
                         () => ItemResult(30, 90101),
@@ -234,6 +246,7 @@ namespace DfoServer.SelfTests
                         new DailyResetService(database));
                     var afterReentry = recreatedGuard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         definition,
                         MonsterA,
                         () =>
@@ -251,6 +264,7 @@ namespace DfoServer.SelfTests
                     ForcePreviousGameDay(database);
                     var afterRollover = recreatedGuard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         definition,
                         MonsterA,
                         () => ItemResult(32, 90103),
@@ -268,6 +282,161 @@ namespace DfoServer.SelfTests
                 });
         }
 
+        private static void VerifyGenerationKeepsStartingGameDay(
+            ref int failures)
+        {
+            failures += WithDatabase(
+                "anchored-boundary",
+                (database, dailyReset) =>
+                {
+                    var localFailures = 0;
+                    var definition = ParseDefinition(groupKey: 99);
+                    var beforeBoundary = new DateTime(
+                        2026,
+                        9,
+                        14,
+                        21,
+                        59,
+                        59,
+                        DateTimeKind.Utc);
+                    var afterBoundary = beforeBoundary.AddSeconds(2);
+                    var utcNow = beforeBoundary;
+                    var guard = new SequentialDungeonDailyLootGuard(
+                        dailyReset,
+                        () => utcNow);
+
+                    var generated = guard.GenerateAndMark(
+                        CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
+                        definition,
+                        MonsterA,
+                        () =>
+                        {
+                            utcNow = afterBoundary;
+                            return ItemResult(33, 90104);
+                        },
+                        _ => { });
+                    var startingDayCount = dailyReset.GetCounter(
+                        CharacterId,
+                        SequentialDungeonDailyLootGuard.BuildCounterKey(
+                            definition.GroupKey,
+                            MonsterA),
+                        DailyResetService.PeriodDay,
+                        beforeBoundary);
+                    var newDayCount = dailyReset.GetCounter(
+                        CharacterId,
+                        SequentialDungeonDailyLootGuard.BuildCounterKey(
+                            definition.GroupKey,
+                            MonsterA),
+                        DailyResetService.PeriodDay,
+                        afterBoundary);
+                    var afterBoundaryGuard =
+                        new SequentialDungeonDailyLootGuard(
+                            dailyReset,
+                            () => afterBoundary);
+                    var nextDay = afterBoundaryGuard.GenerateAndMark(
+                        CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
+                        definition,
+                        MonsterA,
+                        () => ItemResult(34, 90105),
+                        _ => { });
+
+                    Check(
+                        "one generation is claimed against its starting game day",
+                        generated.Drops?.Count == 1
+                            && startingDayCount == 1
+                            && newDayCount == 0
+                            && nextDay.Drops?.Count == 1,
+                        ref localFailures);
+                    return localFailures;
+                });
+        }
+
+        private static void VerifyAmbiguousDefinitionFailsClosed(
+            ref int failures)
+        {
+            failures += WithDatabase(
+                "ambiguous",
+                (database, dailyReset) =>
+                {
+                    var localFailures = 0;
+                    var catalog = SequentialDungeonDefinitionCatalog.Parse(
+                        $@"
+[sequential dungeon]
+99
+[dungeon index check]
+320
+[/dungeon index check]
+[monster index check]
+{MonsterA}
+[/monster index check]
+[show individual process]
+[/show individual process]
+[/sequential dungeon]
+[sequential dungeon]
+100
+[dungeon index check]
+320
+[/dungeon index check]
+[monster index check]
+{MonsterA}
+[/monster index check]
+[show individual process]
+[/show individual process]
+[/sequential dungeon]",
+                        _ => (byte)2);
+                    var ambiguousInstance = new DungeonInstance(
+                        dungeonId: 320,
+                        difficulty: 0,
+                        sequentialCatalog: catalog);
+                    var guard = new SequentialDungeonDailyLootGuard(
+                        dailyReset);
+                    var ambiguousGenerated = false;
+                    var ambiguous = guard.GenerateAndMark(
+                        CharacterId,
+                        ambiguousInstance.SequentialDefinitionResolution,
+                        ambiguousInstance.SequentialDefinition,
+                        MonsterA,
+                        () =>
+                        {
+                            ambiguousGenerated = true;
+                            return ItemResult(35, 90106);
+                        },
+                        _ => { });
+
+                    var ordinaryInstance = new DungeonInstance(
+                        dungeonId: 321,
+                        difficulty: 0,
+                        sequentialCatalog: catalog);
+                    var ordinary = guard.GenerateAndMark(
+                        CharacterId,
+                        ordinaryInstance.SequentialDefinitionResolution,
+                        ordinaryInstance.SequentialDefinition,
+                        MonsterA,
+                        () => ItemResult(36, 90107),
+                        _ => { });
+
+                    Check(
+                        "an ambiguous frozen definition fails closed",
+                        ambiguousInstance.SequentialDefinitionResolution
+                            == SequentialDungeonCapabilityResolution.Ambiguous
+                            && ambiguousInstance.SequentialDefinition == null
+                            && ambiguous.Drops?.Count == 0
+                            && ambiguous.GoldAmount == 0
+                            && !ambiguousGenerated,
+                        ref localFailures);
+                    Check(
+                        "an absent definition preserves ordinary dungeon drops",
+                        ordinaryInstance.SequentialDefinitionResolution
+                            == SequentialDungeonCapabilityResolution.Absent
+                            && ordinaryInstance.SequentialDefinition == null
+                            && ordinary.Drops?.Count == 1,
+                        ref localFailures);
+                    return localFailures;
+                });
+        }
+
         private static void VerifyClaimFailureRollsBack(ref int failures)
         {
             failures += WithDatabase(
@@ -280,6 +449,7 @@ namespace DfoServer.SelfTests
                     var rolledBack = new List<DropInfo>();
                     var raced = guard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         definition,
                         MonsterA,
                         () =>
@@ -315,6 +485,7 @@ namespace DfoServer.SelfTests
                     var rolledBack = new List<DropInfo>();
                     var failed = guard.GenerateAndMark(
                         CharacterId,
+                        SequentialDungeonCapabilityResolution.Resolved,
                         definition,
                         MonsterA,
                         () => ItemResult(41, 90202),
@@ -325,6 +496,57 @@ namespace DfoServer.SelfTests
                             && failed.GoldAmount == 0
                             && rolledBack.Count == 1
                             && rolledBack[0].SceneSlot == 41,
+                        ref localFailures);
+                    return localFailures;
+                });
+        }
+
+        private static void VerifyGenerationExceptionPropagates(
+            ref int failures)
+        {
+            failures += WithDatabase(
+                "generate-exception",
+                (database, dailyReset) =>
+                {
+                    var localFailures = 0;
+                    var definition = ParseDefinition(groupKey: 99);
+                    var guard = new SequentialDungeonDailyLootGuard(dailyReset);
+                    var generated = false;
+                    var propagated = false;
+
+                    try
+                    {
+                        guard.GenerateAndMark(
+                            CharacterId,
+                            SequentialDungeonCapabilityResolution.Resolved,
+                            definition,
+                            MonsterA,
+                            () =>
+                            {
+                                generated = true;
+                                throw new InvalidOperationException(
+                                    "injected generation failure");
+                            },
+                            _ => throw new InvalidOperationException(
+                                "generation failures must not roll back"));
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        propagated = string.Equals(
+                            ex.Message,
+                            "injected generation failure",
+                            StringComparison.Ordinal);
+                    }
+
+                    Check(
+                        "a generation exception propagates without claiming",
+                        generated
+                            && propagated
+                            && dailyReset.GetCounter(
+                                CharacterId,
+                                SequentialDungeonDailyLootGuard.BuildCounterKey(
+                                    definition.GroupKey,
+                                    MonsterA)) == 0,
                         ref localFailures);
                     return localFailures;
                 });
