@@ -14,10 +14,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             IReadOnlyList<DungeonParticipantRosterEntry> succeeded,
             IReadOnlyList<DungeonParticipantRosterEntry> failed)
         {
-            Succeeded = succeeded
-                ?? Array.Empty<DungeonParticipantRosterEntry>();
-            Failed = failed
-                ?? Array.Empty<DungeonParticipantRosterEntry>();
+            Succeeded = Freeze(succeeded);
+            Failed = Freeze(failed);
         }
 
         internal IReadOnlyList<DungeonParticipantRosterEntry> Succeeded
@@ -28,6 +26,15 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal IReadOnlyList<DungeonParticipantRosterEntry> Failed
         {
             get;
+        }
+
+        private static IReadOnlyList<DungeonParticipantRosterEntry> Freeze(
+            IReadOnlyList<DungeonParticipantRosterEntry> source)
+        {
+            if (source == null || source.Count == 0)
+                return Array.Empty<DungeonParticipantRosterEntry>();
+
+            return source.ToList().AsReadOnly();
         }
     }
 
@@ -49,7 +56,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                 orderedRoster.Count);
             var failed = new List<DungeonParticipantRosterEntry>();
 
-            if (packets == null || packets.Any(packet => packet == null))
+            if (packets == null
+                || packets.Count == 0
+                || packets.Any(packet => packet == null))
             {
                 failed.AddRange(orderedRoster);
                 return new PartyPacketSendResult(

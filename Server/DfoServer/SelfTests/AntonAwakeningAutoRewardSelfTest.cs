@@ -123,6 +123,47 @@ namespace DfoServer.SelfTests
                     && leftPackets[1].SequenceEqual(rightPackets[1]),
                     ref failures);
 
+                var emptyBatchResult = new PartyPacketSender(sessions)
+                    .SendToPartyAsync(
+                        reversedRoster,
+                        Array.Empty<byte[]>())
+                    .GetAwaiter()
+                    .GetResult();
+                Check(
+                    "empty packet batch fails every participant without writing",
+                    emptyBatchResult.Succeeded.Count == 0
+                    && emptyBatchResult.Failed.Count == 2
+                    && ReferenceEquals(
+                        emptyBatchResult.Failed[0],
+                        leftParticipant)
+                    && ReferenceEquals(
+                        emptyBatchResult.Failed[1],
+                        rightParticipant)
+                    && left.AvailableByteCount == 0
+                    && right.AvailableByteCount == 0,
+                    ref failures);
+
+                var mutableSucceeded = new List<
+                    DungeonParticipantRosterEntry> { leftParticipant };
+                var mutableFailed = new List<
+                    DungeonParticipantRosterEntry> { rightParticipant };
+                var frozenResult = new PartyPacketSendResult(
+                    mutableSucceeded,
+                    mutableFailed);
+                mutableSucceeded.Clear();
+                mutableFailed.Clear();
+                Check(
+                    "packet result owns frozen roster snapshots",
+                    frozenResult.Succeeded.Count == 1
+                    && ReferenceEquals(
+                        frozenResult.Succeeded[0],
+                        leftParticipant)
+                    && frozenResult.Failed.Count == 1
+                    && ReferenceEquals(
+                        frozenResult.Failed[0],
+                        rightParticipant),
+                    ref failures);
+
                 right.Session.Player.CurrentRun = new DungeonRun(
                     instance,
                     DungeonIdentityGenerator.NextRunId(),
