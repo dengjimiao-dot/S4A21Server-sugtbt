@@ -51,6 +51,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal Game.Party.PartyManager PartyManager { get; }
         internal Game.Raid.RaidManager RaidManager { get; }
         internal Game.Session.ISessionDirectory Sessions { get; }
+        internal PartyPacketSender PartyPackets { get; }
         internal CardRewardCoordinator CardRewards { get; }
         internal Game.Dungeon.DropService Drops { get; }
         internal Game.Premium.DevilContractUsagePolicy DevilContracts { get; }
@@ -112,6 +113,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             PartyManager = partyManager;
             RaidManager = raidManager;
             Sessions = sessions;
+            PartyPackets = new PartyPacketSender(Sessions);
             SelectCharacterDataSource = selectCharacterDataSource
                 ?? throw new ArgumentNullException(nameof(selectCharacterDataSource));
             InventoryRefresh = inventoryRefresh;
@@ -210,7 +212,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                     AntonCardService),
                 Sessions,
                 InventoryRefresh,
-                new AntonNormalConquestNotificationSender());
+                new AntonNormalConquestNotificationSender(PartyPackets));
 
             PersistentMechanisms = new DungeonPersistentMechanismCoordinator(
                 CharacterStateRepository,

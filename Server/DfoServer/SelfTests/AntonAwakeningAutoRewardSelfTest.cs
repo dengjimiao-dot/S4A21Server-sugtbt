@@ -22,6 +22,7 @@ namespace DfoServer.SelfTests
             Console.WriteLine("=== ANTON_AWAKENING_AUTO_REWARD selftest ===");
             var failures = 0;
             VerifyStableInstancePlanAndJournal(ref failures);
+            VerifyGenerationSafePartyPacketSender(ref failures);
             VerifyPreparationPlanningRunsOutsideProjectionGate(ref failures);
             VerifyStalePreparationIsNotPublished(ref failures);
             VerifyFourParticipantIndependentPlanning(ref failures);
@@ -36,6 +37,176 @@ namespace DfoServer.SelfTests
                     ? "ANTON_AWAKENING_AUTO_REWARD selftest passed."
                     : $"ANTON_AWAKENING_AUTO_REWARD selftest failed: {failures}");
             return failures == 0 ? 0 : 1;
+        }
+
+        private static void VerifyGenerationSafePartyPacketSender(
+            ref int failures)
+        {
+            var instance = new DungeonInstance(247, 0);
+            var leftRun = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            var rightRun = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            var room = new DungeonRoomIdentity(instance.Identity, 1);
+            var leftParticipant = new DungeonParticipantRosterEntry(
+                61901,
+                101,
+                leftRun,
+                leftRun.CaptureIdentity(),
+                room,
+                1,
+                partySlot: 0);
+            var rightParticipant = new DungeonParticipantRosterEntry(
+                61902,
+                202,
+                rightRun,
+                rightRun.CaptureIdentity(),
+                room,
+                1,
+                partySlot: 1);
+            IReadOnlyList<DungeonParticipantRosterEntry> reversedRoster =
+                new[] { rightParticipant, leftParticipant };
+            var entries = new[]
+            {
+                new Network.Builders.AntonAwakeningRewardEntry(
+                    101, 0, 0, 10157831, 1),
+                new Network.Builders.AntonAwakeningRewardEntry(
+                    202, 0, 2, 10157833, 1),
+            };
+            var sessions = new SessionDirectory();
+
+            using (var left = new ConnectedSession())
+            using (var right = new ConnectedSession())
+            {
+                left.Session.Player.CharacterId = leftParticipant.CharacterId;
+                left.Session.Player.UserId =
+                    leftParticipant.ParticipantUserId;
+                left.Session.Player.CurrentRun = leftRun;
+                right.Session.Player.CharacterId = rightParticipant.CharacterId;
+                right.Session.Player.UserId =
+                    rightParticipant.ParticipantUserId;
+                right.Session.Player.CurrentRun = rightRun;
+                sessions.Register(leftParticipant.CharacterId, left.Session);
+                sessions.Register(rightParticipant.CharacterId, right.Session);
+
+                var sender = new AntonNormalConquestNotificationSender(
+                    new PartyPacketSender(sessions));
+                var result = sender.SendAntonAwakeningRewardToPartyAsync(
+                        reversedRoster,
+                        entries)
+                    .GetAwaiter()
+                    .GetResult();
+                var leftPackets = left.ReadPackets(2);
+                var rightPackets = right.ReadPackets(2);
+                Check(
+                    "both participants receive projection in stable roster order",
+                    result.Succeeded.Count == 2
+                    && result.Failed.Count == 0
+                    && ReferenceEquals(
+                        result.Succeeded[0],
+                        leftParticipant)
+                    && ReferenceEquals(
+                        result.Succeeded[1],
+                        rightParticipant),
+                    ref failures);
+                Check(
+                    "party receives byte-identical packet batch",
+                    leftPackets.Count == 2
+                    && rightPackets.Count == 2
+                    && leftPackets[0].SequenceEqual(rightPackets[0])
+                    && leftPackets[1].SequenceEqual(rightPackets[1]),
+                    ref failures);
+
+                right.Session.Player.CurrentRun = new DungeonRun(
+                    instance,
+                    DungeonIdentityGenerator.NextRunId(),
+                    rightRun.RunGeneration + 1,
+                    DungeonRunState.Active);
+                var staleResult = sender
+                    .SendAntonAwakeningRewardToPartyAsync(
+                        reversedRoster,
+                        entries)
+                    .GetAwaiter()
+                    .GetResult();
+                var validRetryPackets = left.ReadPackets(2);
+                Check(
+                    "stale participant fails without interrupting valid peer",
+                    staleResult.Succeeded.Count == 1
+                    && ReferenceEquals(
+                        staleResult.Succeeded[0],
+                        leftParticipant)
+                    && staleResult.Failed.Count == 1
+                    && ReferenceEquals(
+                        staleResult.Failed[0],
+                        rightParticipant)
+                    && validRetryPackets.Count == 2
+                    && right.AvailableByteCount == 0,
+                    ref failures);
+
+                right.Session.Player.CurrentRun = rightRun;
+                using (var sendLockHeld = new ManualResetEventSlim())
+                using (var releaseSendLock = new ManualResetEventSlim())
+                {
+                    var blocker = System.Threading.Tasks.Task.Run(() =>
+                        right.Session.TrySendPacketAsync(
+                                Array.Empty<byte>(),
+                                CancellationToken.None,
+                                () =>
+                                {
+                                    sendLockHeld.Set();
+                                    releaseSendLock.Wait(
+                                        TimeSpan.FromSeconds(10));
+                                    return false;
+                                })
+                            .GetAwaiter()
+                            .GetResult());
+                    var lockWasHeld = sendLockHeld.Wait(
+                        TimeSpan.FromSeconds(5));
+                    var queued = new PartyPacketSender(sessions)
+                        .SendToPartyAsync(
+                            new[] { rightParticipant },
+                            new[] { leftPackets[0], leftPackets[1] });
+                    var queuedBehindSendLock = !queued.IsCompleted;
+                    right.Session.Player.CurrentRun = new DungeonRun(
+                        instance,
+                        DungeonIdentityGenerator.NextRunId(),
+                        rightRun.RunGeneration + 1,
+                        DungeonRunState.Active);
+                    releaseSendLock.Set();
+                    System.Threading.Tasks.Task.WaitAll(
+                        new System.Threading.Tasks.Task[] { blocker, queued },
+                        TimeSpan.FromSeconds(10));
+                    var queuedResult = queued.GetAwaiter().GetResult();
+                    Check(
+                        "send-lock queued stale generation writes no old packet",
+                        lockWasHeld
+                        && queuedBehindSendLock
+                        && queuedResult.Succeeded.Count == 0
+                        && queuedResult.Failed.Count == 1
+                        && ReferenceEquals(
+                            queuedResult.Failed[0],
+                            rightParticipant)
+                        && right.AvailableByteCount == 0,
+                        ref failures);
+                }
+
+                sessions.UnregisterAsync(
+                        leftParticipant.CharacterId,
+                        left.Session)
+                    .GetAwaiter()
+                    .GetResult();
+                sessions.UnregisterAsync(
+                        rightParticipant.CharacterId,
+                        right.Session)
+                    .GetAwaiter()
+                    .GetResult();
+            }
         }
 
         private static void VerifyNonRewardableDungeonDoesNotPrepare(

@@ -10,6 +10,41 @@ namespace DfoServer.Network.Handlers.Dungeon
 {
     internal sealed class AntonNormalConquestNotificationSender
     {
+        private readonly PartyPacketSender _partyPackets;
+
+        internal AntonNormalConquestNotificationSender(
+            PartyPacketSender partyPackets = null)
+        {
+            _partyPackets = partyPackets ?? new PartyPacketSender(null);
+        }
+
+        internal Task<PartyPacketSendResult>
+            SendAntonAwakeningRewardToPartyAsync(
+                IReadOnlyList<DungeonParticipantRosterEntry> roster,
+                IReadOnlyList<AntonAwakeningRewardEntry> entries)
+        {
+            if (entries == null || entries.Count == 0)
+                return _partyPackets.SendToPartyAsync(roster, null);
+
+            var body = AntonAwakeningRewardPacketBuilder.Build(entries);
+            if (body == null)
+                return _partyPackets.SendToPartyAsync(roster, null);
+
+            IReadOnlyList<byte[]> packets = new[]
+            {
+                GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    (ushort)NotiPacketTypeA21
+                        .ANTON_AWAKENING_MODE_REWARD,
+                    body),
+                GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    (ushort)NotiPacketTypeA21.EXERCISE_MODE_CLEAR,
+                    new byte[sizeof(uint)]),
+            };
+            return _partyPackets.SendToPartyAsync(roster, packets);
+        }
+
         internal async Task<bool> SendAntonAwakeningRewardAsync(
             EnhancedClientSession session,
             IReadOnlyList<AntonAwakeningRewardEntry> entries,
