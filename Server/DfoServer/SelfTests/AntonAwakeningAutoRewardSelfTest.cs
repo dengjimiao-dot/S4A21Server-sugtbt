@@ -24,6 +24,7 @@ namespace DfoServer.SelfTests
             VerifyStableInstancePlanAndJournal(ref failures);
             VerifyGenerationSafePartyPacketSender(ref failures);
             VerifyPartyPacketBatchIsolation(ref failures);
+            VerifyInFlightWriteTimeoutIsolation(ref failures);
             VerifyPreparationPlanningRunsOutsideProjectionGate(ref failures);
             VerifyStalePreparationIsNotPublished(ref failures);
             VerifyFourParticipantIndependentPlanning(ref failures);
@@ -260,6 +261,124 @@ namespace DfoServer.SelfTests
                         })
                     .GetAwaiter()
                     .GetResult());
+
+        private static void VerifyInFlightWriteTimeoutIsolation(
+            ref int failures)
+        {
+            var instance = new DungeonInstance(247, 0);
+            var blockedRun = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            var healthyRun = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            var room = new DungeonRoomIdentity(instance.Identity, 1);
+            var blockedParticipant = new DungeonParticipantRosterEntry(
+                61901,
+                401,
+                blockedRun,
+                blockedRun.CaptureIdentity(),
+                room,
+                1,
+                partySlot: 0);
+            var healthyParticipant = new DungeonParticipantRosterEntry(
+                61902,
+                402,
+                healthyRun,
+                healthyRun.CaptureIdentity(),
+                room,
+                1,
+                partySlot: 1);
+            IReadOnlyList<DungeonParticipantRosterEntry> roster =
+                new[] { blockedParticipant, healthyParticipant };
+            var sessions = new SessionDirectory();
+
+            using (var blocked = new ConnectedSession())
+            using (var healthy = new ConnectedSession())
+            {
+                blocked.Session.Player.CharacterId =
+                    blockedParticipant.CharacterId;
+                blocked.Session.Player.UserId =
+                    blockedParticipant.ParticipantUserId;
+                blocked.Session.Player.CurrentRun = blockedRun;
+                healthy.Session.Player.CharacterId =
+                    healthyParticipant.CharacterId;
+                healthy.Session.Player.UserId =
+                    healthyParticipant.ParticipantUserId;
+                healthy.Session.Player.CurrentRun = healthyRun;
+                sessions.Register(
+                    blockedParticipant.CharacterId,
+                    blocked.Session);
+                sessions.Register(
+                    healthyParticipant.CharacterId,
+                    healthy.Session);
+
+                blocked.ConstrainSocketBuffers(1024);
+                var blockedBeforeBatch =
+                    blocked.FillWriterUntilWouldBlock();
+                var body = new byte[256 * 1024];
+                body[0] = 0x41;
+                body[body.Length - 1] = 0x42;
+                var packet = GamePacketEnvelopeBuilder.Build(
+                    0x00,
+                    (ushort)NotiPacketTypeA21
+                        .ANTON_AWAKENING_MODE_REWARD,
+                    body);
+                var healthyRead = System.Threading.Tasks.Task.Run(
+                    () => healthy.ReadBytes(packet.Length));
+                var sending = new PartyPacketSender(
+                        sessions,
+                        TimeSpan.FromMilliseconds(500))
+                    .SendToPartyAsync(roster, new[] { packet });
+                var sendCompleted = sending.Wait(TimeSpan.FromSeconds(5));
+                if (!sendCompleted)
+                {
+                    blocked.Session.TcpClient.Close();
+                    sending.Wait(TimeSpan.FromSeconds(5));
+                }
+                var readCompleted = healthyRead.Wait(
+                    TimeSpan.FromSeconds(5));
+                if (!readCompleted)
+                    healthy.Session.TcpClient.Close();
+
+                var result = sendCompleted
+                    ? sending.GetAwaiter().GetResult()
+                    : null;
+                var received = readCompleted ? healthyRead.Result : null;
+                Check(
+                    "in-flight write timeout retires only blocked transport",
+                    blockedBeforeBatch
+                    && sendCompleted
+                    && result != null
+                    && result.Succeeded.Count == 1
+                    && ReferenceEquals(
+                        result.Succeeded[0],
+                        healthyParticipant)
+                    && result.Failed.Count == 1
+                    && ReferenceEquals(
+                        result.Failed[0],
+                        blockedParticipant)
+                    && received != null
+                    && received.SequenceEqual(packet)
+                    && !blocked.Session.TcpClient.Connected,
+                    ref failures);
+
+                sessions.UnregisterAsync(
+                        blockedParticipant.CharacterId,
+                        blocked.Session)
+                    .GetAwaiter()
+                    .GetResult();
+                sessions.UnregisterAsync(
+                        healthyParticipant.CharacterId,
+                        healthy.Session)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+        }
 
         private static void VerifyGenerationSafePartyPacketSender(
             ref int failures)
@@ -1847,6 +1966,68 @@ VALUES (@cid, @aid, @name, 0);";
 
             internal EnhancedClientSession Session { get; }
             internal int AvailableByteCount => _reader.Available;
+
+            internal void ConstrainSocketBuffers(int size)
+            {
+                Session.TcpClient.SendBufferSize = size;
+                _reader.ReceiveBufferSize = size;
+            }
+
+            internal bool FillWriterUntilWouldBlock()
+            {
+                var socket = Session.TcpClient.Client;
+                var originalBlocking = socket.Blocking;
+                var chunk = new byte[64 * 1024];
+                try
+                {
+                    socket.Blocking = false;
+                    for (var round = 0; round < 4; round++)
+                    {
+                        var blocked = false;
+                        for (var sent = 0;
+                             sent < 64 * 1024 * 1024;
+                             sent += chunk.Length)
+                        {
+                            try
+                            {
+                                if (socket.Send(chunk) <= 0)
+                                {
+                                    blocked = true;
+                                    break;
+                                }
+                            }
+                            catch (SocketException ex)
+                                when (ex.SocketErrorCode
+                                          == SocketError.WouldBlock
+                                      || ex.SocketErrorCode
+                                          == SocketError.IOPending
+                                      || ex.SocketErrorCode
+                                          == SocketError.NoBufferSpaceAvailable)
+                            {
+                                blocked = true;
+                                break;
+                            }
+                        }
+
+                        if (!blocked)
+                            return false;
+                        if (round == 3)
+                            return true;
+
+                        socket.Blocking = true;
+                        System.Threading.Thread.Sleep(25);
+                        socket.Blocking = false;
+                    }
+                    return false;
+                }
+                finally
+                {
+                    socket.Blocking = originalBlocking;
+                }
+            }
+
+            internal byte[] ReadBytes(int count)
+                => ReadExact(_reader.GetStream(), count);
 
             internal List<byte[]> ReadPackets(int minimumCount)
             {

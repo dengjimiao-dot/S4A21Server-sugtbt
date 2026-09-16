@@ -66,7 +66,10 @@ namespace DfoServer.Network.Handlers.Dungeon
                 orderedRoster.Count);
             var failed = new List<DungeonParticipantRosterEntry>();
 
-            if (!TryBuildFrozenWireBatch(packets, out var wireBatch))
+            if (!TryBuildFrozenWireBatch(
+                    packets,
+                    out var frozenPackets,
+                    out var wireBatch))
             {
                 failed.AddRange(orderedRoster);
                 return new PartyPacketSendResult(
@@ -79,6 +82,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             {
                 sends[index] = SendParticipantAsync(
                     orderedRoster[index],
+                    frozenPackets,
                     wireBatch);
             }
 
@@ -99,6 +103,7 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         private async Task<bool> SendParticipantAsync(
             DungeonParticipantRosterEntry participant,
+            IReadOnlyList<byte[]> frozenPackets,
             byte[] wireBatch)
         {
             if (!TryResolveCurrentSession(participant, out var session))
@@ -113,7 +118,8 @@ namespace DfoServer.Network.Handlers.Dungeon
                 // each envelope by its own A21 frame length. A directory
                 // replacement observed after canSend is ordered after this
                 // accepted batch; replacement before it fails the predicate.
-                return await session.TrySendPacketAsync(
+                return await session.TrySendPacketBatchAsync(
+                    frozenPackets,
                     wireBatch,
                     timeout.Token,
                     () => IsCurrentSession(participant, session));
@@ -168,8 +174,10 @@ namespace DfoServer.Network.Handlers.Dungeon
 
         private static bool TryBuildFrozenWireBatch(
             IReadOnlyList<byte[]> packets,
+            out IReadOnlyList<byte[]> frozenPackets,
             out byte[] wireBatch)
         {
+            frozenPackets = null;
             wireBatch = null;
             if (packets == null || packets.Count == 0)
                 return false;
@@ -177,7 +185,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             try
             {
                 var packetCount = packets.Count;
-                var frozenPackets = new byte[packetCount][];
+                var copiedPackets = new byte[packetCount][];
                 var totalLength = 0;
                 for (var index = 0; index < packetCount; index++)
                 {
@@ -186,7 +194,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                         return false;
 
                     var frozenPacket = packet.ToArray();
-                    frozenPackets[index] = frozenPacket;
+                    copiedPackets[index] = frozenPacket;
                     totalLength = checked(totalLength + frozenPacket.Length);
                 }
 
@@ -195,7 +203,7 @@ namespace DfoServer.Network.Handlers.Dungeon
 
                 wireBatch = new byte[totalLength];
                 var offset = 0;
-                foreach (var packet in frozenPackets)
+                foreach (var packet in copiedPackets)
                 {
                     Buffer.BlockCopy(
                         packet,
@@ -205,6 +213,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                         packet.Length);
                     offset += packet.Length;
                 }
+                frozenPackets = Array.AsReadOnly(copiedPackets);
                 return true;
             }
             catch (Exception ex)
@@ -213,6 +222,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                       || ex is InvalidOperationException
                       || ex is IndexOutOfRangeException)
             {
+                frozenPackets = null;
                 wireBatch = null;
                 return false;
             }
