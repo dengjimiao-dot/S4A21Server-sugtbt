@@ -41,10 +41,20 @@ namespace DfoServer.Network.Handlers.Dungeon
     internal sealed class PartyPacketSender
     {
         private readonly ISessionDirectory _sessions;
+        private readonly TimeSpan _sendLockTimeout;
 
-        internal PartyPacketSender(ISessionDirectory sessions)
+        internal PartyPacketSender(
+            ISessionDirectory sessions,
+            TimeSpan? sendLockTimeout = null)
         {
             _sessions = sessions;
+            _sendLockTimeout = sendLockTimeout
+                ?? SessionDirectory.BestEffortSendTimeout;
+            if (_sendLockTimeout <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(sendLockTimeout));
+            }
         }
 
         internal async Task<PartyPacketSendResult> SendToPartyAsync(
@@ -56,9 +66,7 @@ namespace DfoServer.Network.Handlers.Dungeon
                 orderedRoster.Count);
             var failed = new List<DungeonParticipantRosterEntry>();
 
-            if (packets == null
-                || packets.Count == 0
-                || packets.Any(packet => packet == null))
+            if (!TryBuildFrozenWireBatch(packets, out var wireBatch))
             {
                 failed.AddRange(orderedRoster);
                 return new PartyPacketSendResult(
@@ -66,42 +74,19 @@ namespace DfoServer.Network.Handlers.Dungeon
                     failed.AsReadOnly());
             }
 
-            foreach (var participant in orderedRoster)
+            var sends = new Task<bool>[orderedRoster.Count];
+            for (var index = 0; index < orderedRoster.Count; index++)
             {
-                if (!TryResolveCurrentSession(participant, out var session))
-                {
-                    failed.Add(participant);
-                    continue;
-                }
+                sends[index] = SendParticipantAsync(
+                    orderedRoster[index],
+                    wireBatch);
+            }
 
-                var sent = true;
-                try
-                {
-                    foreach (var packet in packets)
-                    {
-                        if (!await session.TrySendPacketAsync(
-                                packet,
-                                CancellationToken.None,
-                                () => IsCurrentSession(
-                                    participant,
-                                    session)))
-                        {
-                            sent = false;
-                            break;
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    sent = false;
-                    FileLogger.Log(
-                        $"[PartyPacketSender] packet batch failed: "
-                        + $"cid={participant?.CharacterId ?? 0} "
-                        + $"userId={participant?.ParticipantUserId ?? 0} "
-                        + $"error={ex.GetType().Name}: {ex.Message}");
-                }
-
-                if (sent)
+            var results = await Task.WhenAll(sends);
+            for (var index = 0; index < orderedRoster.Count; index++)
+            {
+                var participant = orderedRoster[index];
+                if (results[index])
                     succeeded.Add(participant);
                 else
                     failed.Add(participant);
@@ -110,6 +95,38 @@ namespace DfoServer.Network.Handlers.Dungeon
             return new PartyPacketSendResult(
                 succeeded.AsReadOnly(),
                 failed.AsReadOnly());
+        }
+
+        private async Task<bool> SendParticipantAsync(
+            DungeonParticipantRosterEntry participant,
+            byte[] wireBatch)
+        {
+            if (!TryResolveCurrentSession(participant, out var session))
+                return false;
+
+            try
+            {
+                using var timeout = new CancellationTokenSource(
+                    _sendLockTimeout);
+                // One transport write gives the ordered envelope batch one
+                // send-lock linearization point. The receiver still parses
+                // each envelope by its own A21 frame length. A directory
+                // replacement observed after canSend is ordered after this
+                // accepted batch; replacement before it fails the predicate.
+                return await session.TrySendPacketAsync(
+                    wireBatch,
+                    timeout.Token,
+                    () => IsCurrentSession(participant, session));
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log(
+                    $"[PartyPacketSender] packet batch failed: "
+                    + $"cid={participant?.CharacterId ?? 0} "
+                    + $"userId={participant?.ParticipantUserId ?? 0} "
+                    + $"error={ex.GetType().Name}: {ex.Message}");
+                return false;
+            }
         }
 
         private bool TryResolveCurrentSession(
@@ -147,6 +164,58 @@ namespace DfoServer.Network.Handlers.Dungeon
                 && ReferenceEquals(player.CurrentRun, participant.Run)
                 && player.IsCurrentDungeonRun(participant.RunIdentity)
                 && participant.Run.Matches(participant.RunIdentity);
+        }
+
+        private static bool TryBuildFrozenWireBatch(
+            IReadOnlyList<byte[]> packets,
+            out byte[] wireBatch)
+        {
+            wireBatch = null;
+            if (packets == null || packets.Count == 0)
+                return false;
+
+            try
+            {
+                var packetCount = packets.Count;
+                var frozenPackets = new byte[packetCount][];
+                var totalLength = 0;
+                for (var index = 0; index < packetCount; index++)
+                {
+                    var packet = packets[index];
+                    if (packet == null || packet.Length == 0)
+                        return false;
+
+                    var frozenPacket = packet.ToArray();
+                    frozenPackets[index] = frozenPacket;
+                    totalLength = checked(totalLength + frozenPacket.Length);
+                }
+
+                if (totalLength <= 0)
+                    return false;
+
+                wireBatch = new byte[totalLength];
+                var offset = 0;
+                foreach (var packet in frozenPackets)
+                {
+                    Buffer.BlockCopy(
+                        packet,
+                        0,
+                        wireBatch,
+                        offset,
+                        packet.Length);
+                    offset += packet.Length;
+                }
+                return true;
+            }
+            catch (Exception ex)
+                when (ex is OverflowException
+                      || ex is ArgumentException
+                      || ex is InvalidOperationException
+                      || ex is IndexOutOfRangeException)
+            {
+                wireBatch = null;
+                return false;
+            }
         }
 
         private static IReadOnlyList<DungeonParticipantRosterEntry>

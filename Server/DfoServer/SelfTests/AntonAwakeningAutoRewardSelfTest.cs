@@ -23,6 +23,7 @@ namespace DfoServer.SelfTests
             var failures = 0;
             VerifyStableInstancePlanAndJournal(ref failures);
             VerifyGenerationSafePartyPacketSender(ref failures);
+            VerifyPartyPacketBatchIsolation(ref failures);
             VerifyPreparationPlanningRunsOutsideProjectionGate(ref failures);
             VerifyStalePreparationIsNotPublished(ref failures);
             VerifyFourParticipantIndependentPlanning(ref failures);
@@ -38,6 +39,227 @@ namespace DfoServer.SelfTests
                     : $"ANTON_AWAKENING_AUTO_REWARD selftest failed: {failures}");
             return failures == 0 ? 0 : 1;
         }
+
+        private static void VerifyPartyPacketBatchIsolation(
+            ref int failures)
+        {
+            var instance = new DungeonInstance(247, 0);
+            var leftRun = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            var rightRun = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            var room = new DungeonRoomIdentity(instance.Identity, 1);
+            var leftParticipant = new DungeonParticipantRosterEntry(
+                61801,
+                301,
+                leftRun,
+                leftRun.CaptureIdentity(),
+                room,
+                1,
+                partySlot: 0);
+            var rightParticipant = new DungeonParticipantRosterEntry(
+                61802,
+                302,
+                rightRun,
+                rightRun.CaptureIdentity(),
+                room,
+                1,
+                partySlot: 1);
+            IReadOnlyList<DungeonParticipantRosterEntry> roster =
+                new[] { leftParticipant, rightParticipant };
+            var sessions = new SessionDirectory();
+
+            using (var left = new ConnectedSession())
+            using (var right = new ConnectedSession())
+            {
+                left.Session.Player.CharacterId = leftParticipant.CharacterId;
+                left.Session.Player.UserId =
+                    leftParticipant.ParticipantUserId;
+                left.Session.Player.CurrentRun = leftRun;
+                right.Session.Player.CharacterId = rightParticipant.CharacterId;
+                right.Session.Player.UserId =
+                    rightParticipant.ParticipantUserId;
+                right.Session.Player.CurrentRun = rightRun;
+                sessions.Register(leftParticipant.CharacterId, left.Session);
+                sessions.Register(rightParticipant.CharacterId, right.Session);
+                var sender = new PartyPacketSender(sessions);
+
+                var mutablePackets = new List<byte[]>
+                {
+                    GamePacketEnvelopeBuilder.Build(
+                        0x00,
+                        (ushort)NotiPacketTypeA21
+                            .ANTON_AWAKENING_MODE_REWARD,
+                        new byte[] { 0x11, 0x12, 0x13 }),
+                    GamePacketEnvelopeBuilder.Build(
+                        0x00,
+                        (ushort)NotiPacketTypeA21.EXERCISE_MODE_CLEAR,
+                        new byte[] { 0x21, 0x22, 0x23, 0x24 }),
+                };
+                var expectedPackets = mutablePackets
+                    .Select(packet => packet.ToArray())
+                    .ToArray();
+                using (var sendLockHeld = new ManualResetEventSlim())
+                using (var releaseSendLock = new ManualResetEventSlim())
+                {
+                    var blocker = HoldSendLock(
+                        right.Session,
+                        sendLockHeld,
+                        releaseSendLock);
+                    var lockWasHeld = sendLockHeld.Wait(
+                        TimeSpan.FromSeconds(5));
+                    var sending = sender.SendToPartyAsync(
+                        roster,
+                        mutablePackets);
+                    var leftPackets = left.ReadPackets(2);
+                    var queuedBehindRightLock = !sending.IsCompleted;
+                    mutablePackets[0][15] ^= 0x7F;
+                    mutablePackets[1] = GamePacketEnvelopeBuilder.Build(
+                        0x00,
+                        (ushort)NotiPacketTypeA21.DUNGEON_PERMISSION,
+                        new byte[] { 0x31, 0x32, 0x33, 0x34 });
+                    releaseSendLock.Set();
+                    System.Threading.Tasks.Task.WaitAll(
+                        new System.Threading.Tasks.Task[]
+                        {
+                            blocker,
+                            sending,
+                        },
+                        TimeSpan.FromSeconds(10));
+                    var result = sending.GetAwaiter().GetResult();
+                    List<byte[]> rightPackets = null;
+                    try
+                    {
+                        rightPackets = right.ReadPackets(2);
+                    }
+                    catch (TimeoutException)
+                    {
+                        // The old per-envelope implementation can write the
+                        // first frame, observe the mutated list, and abort the
+                        // second frame. Keep that outcome as an assertion
+                        // failure instead of terminating the whole selftest.
+                    }
+                    Check(
+                        "party sender freezes packet list and bytes before awaits",
+                        lockWasHeld
+                        && queuedBehindRightLock
+                        && result.Succeeded.Count == 2
+                        && rightPackets != null
+                        && leftPackets[0].SequenceEqual(expectedPackets[0])
+                        && leftPackets[1].SequenceEqual(expectedPackets[1])
+                        && rightPackets[0].SequenceEqual(expectedPackets[0])
+                        && rightPackets[1].SequenceEqual(expectedPackets[1]),
+                        ref failures);
+                }
+
+                var packets = expectedPackets
+                    .Select(packet => packet.ToArray())
+                    .ToArray();
+                using (var sendLockHeld = new ManualResetEventSlim())
+                using (var releaseSendLock = new ManualResetEventSlim())
+                {
+                    var blocker = HoldSendLock(
+                        left.Session,
+                        sendLockHeld,
+                        releaseSendLock);
+                    var lockWasHeld = sendLockHeld.Wait(
+                        TimeSpan.FromSeconds(5));
+                    var sending = new PartyPacketSender(
+                            sessions,
+                            TimeSpan.FromMilliseconds(150))
+                        .SendToPartyAsync(roster, packets);
+                    var rightReceivedBeforeLeftReleased = SpinWait.SpinUntil(
+                        () => right.AvailableByteCount > 0,
+                        TimeSpan.FromSeconds(2));
+                    var completedWhileLeftHeld = sending.Wait(
+                        TimeSpan.FromSeconds(3));
+                    releaseSendLock.Set();
+                    System.Threading.Tasks.Task.WaitAll(
+                        new System.Threading.Tasks.Task[]
+                        {
+                            blocker,
+                            sending,
+                        },
+                        TimeSpan.FromSeconds(10));
+                    var result = sending.GetAwaiter().GetResult();
+                    var rightPackets = right.ReadPackets(2);
+                    Check(
+                        "blocked participant times out without blocking peer batch",
+                        lockWasHeld
+                        && rightReceivedBeforeLeftReleased
+                        && completedWhileLeftHeld
+                        && result.Succeeded.Count == 1
+                        && ReferenceEquals(
+                            result.Succeeded[0],
+                            rightParticipant)
+                        && result.Failed.Count == 1
+                        && ReferenceEquals(
+                            result.Failed[0],
+                            leftParticipant)
+                        && left.AvailableByteCount == 0,
+                        ref failures);
+                    Check(
+                        "single wire batch remains two ordered A21 envelopes",
+                        BitConverter.ToUInt16(rightPackets[0], 1)
+                            == (ushort)NotiPacketTypeA21
+                                .ANTON_AWAKENING_MODE_REWARD
+                        && BitConverter.ToUInt16(rightPackets[1], 1)
+                            == (ushort)NotiPacketTypeA21.EXERCISE_MODE_CLEAR,
+                        ref failures);
+                }
+
+                var emptyElementResult = sender.SendToPartyAsync(
+                        roster,
+                        new[]
+                        {
+                            Array.Empty<byte>(),
+                            expectedPackets[0],
+                        })
+                    .GetAwaiter()
+                    .GetResult();
+                Check(
+                    "zero-length packet fails the whole batch without writing",
+                    emptyElementResult.Succeeded.Count == 0
+                    && emptyElementResult.Failed.Count == 2
+                    && left.AvailableByteCount == 0
+                    && right.AvailableByteCount == 0,
+                    ref failures);
+
+                sessions.UnregisterAsync(
+                        leftParticipant.CharacterId,
+                        left.Session)
+                    .GetAwaiter()
+                    .GetResult();
+                sessions.UnregisterAsync(
+                        rightParticipant.CharacterId,
+                        right.Session)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+        }
+
+        private static System.Threading.Tasks.Task<bool> HoldSendLock(
+            EnhancedClientSession session,
+            ManualResetEventSlim sendLockHeld,
+            ManualResetEventSlim releaseSendLock)
+            => System.Threading.Tasks.Task.Run(() =>
+                session.TrySendPacketAsync(
+                        Array.Empty<byte>(),
+                        CancellationToken.None,
+                        () =>
+                        {
+                            sendLockHeld.Set();
+                            releaseSendLock.Wait(TimeSpan.FromSeconds(10));
+                            return false;
+                        })
+                    .GetAwaiter()
+                    .GetResult());
 
         private static void VerifyGenerationSafePartyPacketSender(
             ref int failures)
