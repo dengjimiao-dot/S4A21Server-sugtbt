@@ -19,6 +19,7 @@ using DfoServer.Game.Party;
 using DfoServer.Game.Raid;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
+using DfoServer.GameWorld;
 using DfoServer.Network;
 using DfoServer.Network.Handlers;
 using DfoServer.Network.Handlers.Pets;
@@ -144,12 +145,16 @@ namespace DfoServer.Infrastructure
             var accountRepository = new SqliteAccountRepository(Database);
             var rentalTimeProvider = SystemRentalTimeProvider.Instance;
             var dailyResetService = new DailyResetService(Database);
+            var sequentialCatalog =
+                SequentialDungeonDefinitionCatalog.Current;
             var antonProgressRepository =
                 new AntonAwakeningDailyProgressRepository(
                     Database,
-                    dailyResetService);
+                    dailyResetService,
+                    sequentialCatalog);
             var antonProgress = new AntonAwakeningDailyProgressService(
-                antonProgressRepository);
+                antonProgressRepository,
+                sequentialCatalog);
             var dungeonPersistentEffects =
                 new DungeonPersistentEffectApplicationService(
                     Database.ConnectionString,
