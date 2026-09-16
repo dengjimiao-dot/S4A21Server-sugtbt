@@ -1022,6 +1022,8 @@ namespace DfoServer.Game.Dungeon
             new SemaphoreSlim(1, 1);
         internal SemaphoreSlim CardRewardProjectionGate { get; } =
             new SemaphoreSlim(1, 1);
+        internal SemaphoreSlim CardRewardSendGate { get; } =
+            new SemaphoreSlim(1, 1);
         internal SemaphoreSlim SettlementTransitionGate { get; } =
             new SemaphoreSlim(1, 1);
         public DungeonParticipantEffectJournal ParticipantEffects { get; } =

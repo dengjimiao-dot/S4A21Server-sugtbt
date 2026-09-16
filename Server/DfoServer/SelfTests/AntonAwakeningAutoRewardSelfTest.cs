@@ -29,9 +29,23 @@ namespace DfoServer.SelfTests
             VerifyStalePreparationIsNotPublished(ref failures);
             VerifyFourParticipantIndependentPlanning(ref failures);
             VerifyParticipantFailureIsolation(ref failures);
+            VerifyNormalCardBarrierRuntime(ref failures);
+            VerifyBarrierSurvivesProductionPreparationOrder(ref failures);
+            VerifyTwoParticipantNormalCardBarrierProjection(ref failures);
+            VerifyFourParticipantDeadlineBarrierProjection(ref failures);
+            VerifyInvalidParticipantDoesNotBlockBarrier(ref failures);
+            VerifyPaidSelectionDetachDeadlineResume(ref failures);
+            VerifyPartialProjectionRetriesOnlyFailedParticipant(ref failures);
+            VerifyNormalDeadlineTimerLifecycle(ref failures);
+            VerifyMissingNormalDeadlineTimerRecovery(ref failures);
+            VerifyLatePaidCardDoesNotCharge(ref failures);
+            VerifyRejectedManualFreeKeepsAutoFlipTimer(ref failures);
+            VerifyCardIoRunsOutsideStateGates(ref failures);
+            VerifyConcurrentEplpRevealKeepsCommand(ref failures);
             VerifyDelayedProjectionState(ref failures);
             VerifyProjectionJournalRecovery(ref failures);
             VerifyTimerGrantAfterProjection(ref failures);
+            VerifyEndingRunDoesNotRearmGrantTimer(ref failures);
             VerifyTransactionalGrant(ref failures);
             VerifyNonRewardableDungeonDoesNotPrepare(ref failures);
             Console.WriteLine(
@@ -39,6 +53,1266 @@ namespace DfoServer.SelfTests
                     ? "ANTON_AWAKENING_AUTO_REWARD selftest passed."
                     : $"ANTON_AWAKENING_AUTO_REWARD selftest failed: {failures}");
             return failures == 0 ? 0 : 1;
+        }
+
+        private static void VerifyNormalCardBarrierRuntime(ref int failures)
+        {
+            var instance = new DungeonInstance(247, 0);
+            var leftRun = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            var rightRun = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            var room = new DungeonRoomIdentity(instance.Identity, 1);
+            var left = new DungeonParticipantRosterEntry(
+                61901,
+                401,
+                leftRun,
+                leftRun.CaptureIdentity(),
+                room,
+                1,
+                partySlot: 0);
+            var right = new DungeonParticipantRosterEntry(
+                61902,
+                402,
+                rightRun,
+                rightRun.CaptureIdentity(),
+                room,
+                1,
+                partySlot: 1);
+            var roster = new[] { left, right };
+            var runtime = new AntonAwakeningRewardRuntime();
+            var eventId = Guid.NewGuid();
+            var firstDeadline = DateTime.UtcNow.AddSeconds(6);
+            var slightlyLaterDeadline = firstDeadline.AddMilliseconds(25);
+
+            var registered = runtime.TryRegisterNormalCardBarrier(
+                eventId,
+                roster);
+            var leftDeadline = runtime.TryRecordNormalDeadline(
+                eventId,
+                left.RunIdentity.ParticipantIdentity,
+                firstDeadline);
+            var rightDeadline = runtime.TryRecordNormalDeadline(
+                eventId,
+                right.RunIdentity.ParticipantIdentity,
+                slightlyLaterDeadline);
+            var freeRecorded = runtime.TryMarkCardCommitted(
+                eventId,
+                left.RunIdentity.ParticipantIdentity,
+                CardRewardSide.Free);
+            var manualFreeDidNotOpenBarrier =
+                !runtime.AreAllCurrentParticipantsReady(
+                    eventId,
+                    _ => true);
+            var paidReserved = runtime.TryBeginPaidSelection(
+                eventId,
+                left.RunIdentity.ParticipantIdentity,
+                out _);
+            var paidRecorded = runtime.TryMarkCardCommitted(
+                eventId,
+                left.RunIdentity.ParticipantIdentity,
+                CardRewardSide.Paid);
+            var rightFreeRecorded = runtime.TryMarkCardCommitted(
+                eventId,
+                right.RunIdentity.ParticipantIdentity,
+                CardRewardSide.Free);
+            var closed = runtime.TryMarkDeadlineElapsed(
+                eventId,
+                left.RunIdentity.ParticipantIdentity);
+
+            Check(
+                "normal-card barrier freezes one common absolute deadline",
+                registered
+                && leftDeadline
+                && rightDeadline
+                && runtime.TryGetNormalDeadline(
+                    eventId,
+                    left.RunIdentity.ParticipantIdentity,
+                    out var storedLeftDeadline)
+                && runtime.TryGetNormalDeadline(
+                    eventId,
+                    right.RunIdentity.ParticipantIdentity,
+                    out var storedRightDeadline)
+                && storedLeftDeadline == firstDeadline
+                && storedRightDeadline == firstDeadline,
+                ref failures);
+            Check(
+                "manual free and paid commits wait for the common deadline",
+                freeRecorded
+                && manualFreeDidNotOpenBarrier
+                && paidReserved
+                && paidRecorded
+                && rightFreeRecorded,
+                ref failures);
+            Check(
+                "deadline skips pending paid cards and opens the ready barrier",
+                closed
+                && !runtime.IsPaidSelectionOpen(
+                    eventId,
+                    left.RunIdentity.ParticipantIdentity)
+                && !runtime.IsPaidSelectionOpen(
+                    eventId,
+                    right.RunIdentity.ParticipantIdentity)
+                && runtime.AreAllCurrentParticipantsReady(
+                    eventId,
+                    _ => true),
+                ref failures);
+            Check(
+                "normal-card deadline timer key is independent from auto flip",
+                !DungeonRunTimerKeys.AntonAwakeningNormalCardDeadline.Equals(
+                    DungeonRunTimerKeys.SettlementCardAutoFlow),
+                ref failures);
+        }
+
+        private static void VerifyTwoParticipantNormalCardBarrierProjection(
+            ref int failures)
+        {
+            var instance = new DungeonInstance(247, 0);
+            var leftRun = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            var rightRun = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            var source = DungeonEventEnvelope.Create(
+                leftRun,
+                61911,
+                "anton-normal-card-party-barrier",
+                sourceEventId: Guid.NewGuid());
+            var clearFact = instance.GetOrCreateClearedFact(
+                new DungeonClearIntent(source, "selftest", 0),
+                out _);
+            leftRun.TryBeginClearCommit(clearFact);
+            leftRun.TryCompleteClearCommit(clearFact);
+            rightRun.TryBeginClearCommit(clearFact);
+            rightRun.TryCompleteClearCommit(clearFact);
+            var room = new DungeonRoomIdentity(instance.Identity, 1);
+            var leftParticipant = new DungeonParticipantRosterEntry(
+                61911,
+                411,
+                leftRun,
+                leftRun.CaptureIdentity(),
+                room,
+                1,
+                partySlot: 0);
+            var rightParticipant = new DungeonParticipantRosterEntry(
+                61912,
+                412,
+                rightRun,
+                rightRun.CaptureIdentity(),
+                room,
+                1,
+                partySlot: 1);
+            var roster = new[] { leftParticipant, rightParticipant };
+            var journal = instance.ParticipantEffects;
+            journal.TryFreeze(
+                clearFact.Source,
+                DungeonParticipantEffectAudience.Instance,
+                roster,
+                out _);
+            foreach (var participant in roster)
+            {
+                journal.TryBegin(
+                    clearFact.SourceEventId,
+                    DungeonParticipantEffectAudience.Instance,
+                    participant,
+                    DungeonParticipantEffectKinds.DungeonClear,
+                    out var clearReservation,
+                    out _);
+                journal.TryCommit(clearReservation);
+            }
+
+            var rewards = CreateRewardService(
+                dailyReset: null,
+                finalItemId: 3309,
+                quantity: 2);
+            var sessions = new SessionDirectory();
+            using (var left = new ConnectedSession())
+            using (var right = new ConnectedSession())
+            {
+                left.Session.Player.CharacterId = leftParticipant.CharacterId;
+                left.Session.Player.UserId =
+                    leftParticipant.ParticipantUserId;
+                left.Session.Player.CurrentRun = leftRun;
+                right.Session.Player.CharacterId =
+                    rightParticipant.CharacterId;
+                right.Session.Player.UserId =
+                    rightParticipant.ParticipantUserId;
+                right.Session.Player.CurrentRun = rightRun;
+                sessions.Register(leftParticipant.CharacterId, left.Session);
+                sessions.Register(rightParticipant.CharacterId, right.Session);
+                var coordinator = new AntonAwakeningRewardCoordinator(
+                    rewards,
+                    new AntonAwakeningRewardGrantService(rewards),
+                    sessions,
+                    null,
+                        new AntonNormalConquestNotificationSender(
+                            new PartyPacketSender(sessions)));
+                coordinator.PrepareClearAsync(leftRun, clearFact)
+                    .GetAwaiter()
+                    .GetResult();
+                var cardCoordinator = new CardRewardCoordinator(
+                    sessions: sessions,
+                    antonRewards: coordinator);
+                cardCoordinator.ScheduleAutoFlow(
+                    left.Session,
+                    layoutDelayMs: 60000,
+                    autoFlipDelayMs: 4000);
+                var hasAutoFlowTimer = leftRun.Timers.TryGetCurrentTicket(
+                        DungeonRunTimerKeys.SettlementCardAutoFlow,
+                        out var autoFlowTicket);
+                var hasNormalDeadlineTimer =
+                    leftRun.Timers.TryGetCurrentTicket(
+                        DungeonRunTimerKeys.AntonAwakeningNormalCardDeadline,
+                        out var normalDeadlineTicket);
+                DungeonRunLifecycle.CancelAutoFlip(left.Session);
+                Check(
+                    "manual free cancellation leaves normal deadline armed",
+                    hasAutoFlowTimer
+                    && hasNormalDeadlineTimer
+                    && !leftRun.Timers.IsCurrent(autoFlowTicket)
+                    && leftRun.Timers.IsCurrent(normalDeadlineTicket),
+                    ref failures);
+
+                leftRun.Effects.TryReserve(
+                    CardRewardRules.GetEffectId(
+                        leftRun,
+                        CardRewardSide.Free),
+                    out var leftFree);
+                leftRun.Effects.TryCommit(leftFree);
+                coordinator.OnCardCommittedAsync(
+                        left.Session,
+                        leftRun,
+                        CardRewardSide.Free)
+                    .GetAwaiter()
+                    .GetResult();
+                coordinator.TryProjectReadyPartyAsync(
+                        left.Session,
+                        leftRun)
+                    .GetAwaiter()
+                    .GetResult();
+
+                Check(
+                    "one manual free card cannot project the special party reward",
+                    left.AvailableByteCount == 0
+                    && right.AvailableByteCount == 0,
+                    ref failures);
+
+                rightRun.Effects.TryReserve(
+                    CardRewardRules.GetEffectId(
+                        rightRun,
+                        CardRewardSide.Free),
+                    out var rightFree);
+                rightRun.Effects.TryCommit(rightFree);
+                leftRun.Effects.TryReserve(
+                    CardRewardRules.GetEffectId(
+                        leftRun,
+                        CardRewardSide.Paid),
+                    out var leftPaid);
+                leftRun.Effects.TryCommit(leftPaid);
+                coordinator.OnCardCommittedAsync(
+                        right.Session,
+                        rightRun,
+                        CardRewardSide.Free)
+                    .GetAwaiter()
+                    .GetResult();
+                coordinator.OnCardCommittedAsync(
+                        left.Session,
+                        leftRun,
+                        CardRewardSide.Paid)
+                    .GetAwaiter()
+                    .GetResult();
+                var deadline = DateTime.UtcNow.AddSeconds(6);
+                coordinator.ScheduleNormalPhaseDeadline(
+                    left.Session,
+                    leftRun,
+                    deadline);
+                coordinator.ScheduleNormalPhaseDeadline(
+                    right.Session,
+                    rightRun,
+                    deadline.AddMilliseconds(10));
+                var deadlineElapsed =
+                    coordinator.MarkNormalPhaseDeadlineElapsed(
+                        left.Session,
+                        leftRun);
+                coordinator.TryProjectReadyPartyAsync(
+                        left.Session,
+                        leftRun)
+                    .GetAwaiter()
+                    .GetResult();
+
+                var leftPackets = left.ReadPackets(2);
+                var rightPackets = right.ReadPackets(2);
+                Check(
+                    "common deadline projects one identical full party payload",
+                    deadlineElapsed
+                    && leftPackets.Count == 2
+                    && rightPackets.Count == 2
+                    && leftPackets[0].SequenceEqual(rightPackets[0])
+                    && leftPackets[1].SequenceEqual(rightPackets[1])
+                    && BitConverter.ToUInt32(leftPackets[0], 15) == 2
+                    && BitConverter.ToUInt16(leftPackets[0], 1)
+                        == (ushort)NotiPacketTypeA21
+                            .ANTON_AWAKENING_MODE_REWARD
+                    && BitConverter.ToUInt16(leftPackets[1], 1)
+                        == (ushort)NotiPacketTypeA21.EXERCISE_MODE_CLEAR,
+                    ref failures);
+
+                leftRun.Timers.CancelAll();
+                rightRun.Timers.CancelAll();
+                sessions.UnregisterAsync(
+                        leftParticipant.CharacterId,
+                        left.Session)
+                    .GetAwaiter()
+                    .GetResult();
+                sessions.UnregisterAsync(
+                        rightParticipant.CharacterId,
+                        right.Session)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+        }
+
+        private static void VerifyBarrierSurvivesProductionPreparationOrder(
+            ref int failures)
+        {
+            using (var fixture = new BarrierPartyFixture(
+                leftCharacterId: 61921,
+                rightCharacterId: 61922,
+                prepareImmediately: false))
+            {
+                var deadline = DateTime.UtcNow.AddMinutes(1);
+                fixture.Coordinator.ScheduleNormalPhaseDeadline(
+                    fixture.Left.Session,
+                    fixture.LeftRun,
+                    deadline);
+                fixture.Coordinator.ScheduleNormalPhaseDeadline(
+                    fixture.Right.Session,
+                    fixture.RightRun,
+                    deadline.AddMilliseconds(10));
+                fixture.CommitCard(
+                    fixture.LeftParticipant,
+                    fixture.Left.Session,
+                    CardRewardSide.Free);
+                fixture.CommitCard(
+                    fixture.RightParticipant,
+                    fixture.Right.Session,
+                    CardRewardSide.Free);
+                fixture.CommitCard(
+                    fixture.LeftParticipant,
+                    fixture.Left.Session,
+                    CardRewardSide.Paid);
+                var elapsed = fixture.Coordinator
+                    .MarkNormalPhaseDeadlineElapsed(
+                        fixture.Left.Session,
+                        fixture.LeftRun);
+
+                fixture.Coordinator.TryProjectReadyPartyAsync(
+                        fixture.Left.Session,
+                        fixture.LeftRun)
+                    .GetAwaiter()
+                    .GetResult();
+                var silentBeforePreparation =
+                    fixture.Left.AvailableByteCount == 0
+                    && fixture.Right.AvailableByteCount == 0;
+
+                fixture.Prepare();
+                var leftPackets = fixture.Left.ReadPackets(2);
+                var rightPackets = fixture.Right.ReadPackets(2);
+
+                Check(
+                    "production order preserves card barrier before plan publication",
+                    elapsed
+                    && silentBeforePreparation
+                    && leftPackets.Count == 2
+                    && rightPackets.Count == 2
+                    && leftPackets[0].SequenceEqual(rightPackets[0])
+                    && leftPackets[1].SequenceEqual(rightPackets[1]),
+                    ref failures);
+            }
+        }
+
+        private static void VerifyFourParticipantDeadlineBarrierProjection(
+            ref int failures)
+        {
+            var instance = new DungeonInstance(247, 0);
+            var roster = BuildRoster(instance, 4, characterIdBase: 61970);
+            var source = DungeonEventEnvelope.Create(
+                roster[0].Run,
+                roster[0].CharacterId,
+                "anton-four-member-deadline-barrier",
+                sourceEventId: Guid.NewGuid());
+            var clearFact = instance.GetOrCreateClearedFact(
+                new DungeonClearIntent(source, "selftest", 0),
+                out _);
+            foreach (var participant in roster)
+            {
+                participant.Run.TryBeginClearCommit(clearFact);
+                participant.Run.TryCompleteClearCommit(clearFact);
+            }
+
+            var journal = instance.ParticipantEffects;
+            journal.TryFreeze(
+                clearFact.Source,
+                DungeonParticipantEffectAudience.Instance,
+                roster,
+                out _);
+            foreach (var participant in roster)
+            {
+                journal.TryBegin(
+                    clearFact.SourceEventId,
+                    DungeonParticipantEffectAudience.Instance,
+                    participant,
+                    DungeonParticipantEffectKinds.DungeonClear,
+                    out var clearReservation,
+                    out _);
+                journal.TryCommit(clearReservation);
+            }
+
+            var sessions = new SessionDirectory();
+            var captures = new List<ConnectedSession>();
+            try
+            {
+                foreach (var participant in roster)
+                {
+                    var capture = new ConnectedSession();
+                    captures.Add(capture);
+                    capture.Session.Player.CharacterId =
+                        participant.CharacterId;
+                    capture.Session.Player.UserId =
+                        participant.ParticipantUserId;
+                    capture.Session.Player.CurrentRun = participant.Run;
+                    sessions.Register(
+                        participant.CharacterId,
+                        capture.Session);
+                }
+
+                var rewards = CreateRewardService(
+                    dailyReset: null,
+                    finalItemId: 3309,
+                    quantity: 2);
+                var coordinator = new AntonAwakeningRewardCoordinator(
+                    rewards,
+                    new AntonAwakeningRewardGrantService(rewards),
+                    sessions,
+                    null,
+                    new AntonNormalConquestNotificationSender(
+                        new PartyPacketSender(sessions)));
+                coordinator.PrepareClearAsync(roster[0].Run, clearFact)
+                    .GetAwaiter()
+                    .GetResult();
+
+                var deadline = DateTime.UtcNow.AddMinutes(1);
+                for (var index = 0; index < roster.Count; index++)
+                {
+                    coordinator.ScheduleNormalPhaseDeadline(
+                        captures[index].Session,
+                        roster[index].Run,
+                        deadline.AddMilliseconds(index));
+                }
+                for (var index = 0; index < roster.Count - 1; index++)
+                {
+                    CommitCard(
+                        coordinator,
+                        roster[index],
+                        captures[index].Session,
+                        CardRewardSide.Free);
+                }
+                CommitCard(
+                    coordinator,
+                    roster[0],
+                    captures[0].Session,
+                    CardRewardSide.Paid);
+                var elapsed = coordinator.MarkNormalPhaseDeadlineElapsed(
+                    captures[0].Session,
+                    roster[0].Run);
+                coordinator.TryProjectReadyPartyAsync(
+                        captures[0].Session,
+                        roster[0].Run)
+                    .GetAwaiter()
+                    .GetResult();
+                var blockedByFourth = captures.All(value =>
+                    value.AvailableByteCount == 0);
+
+                CommitCard(
+                    coordinator,
+                    roster[3],
+                    captures[3].Session,
+                    CardRewardSide.Free);
+                coordinator.TryProjectReadyPartyAsync(
+                        captures[3].Session,
+                        roster[3].Run)
+                    .GetAwaiter()
+                    .GetResult();
+                var packets = captures
+                    .Select(value => value.ReadPackets(2))
+                    .ToList();
+
+                Check(
+                    "four-member deadline barrier waits for every free card",
+                    elapsed
+                    && blockedByFourth
+                    && packets.All(value => value.Count == 2)
+                    && packets.Skip(1).All(value =>
+                        value[0].SequenceEqual(packets[0][0])
+                        && value[1].SequenceEqual(packets[0][1]))
+                    && BitConverter.ToUInt32(packets[0][0], 15) == 4,
+                    ref failures);
+            }
+            finally
+            {
+                foreach (var participant in roster)
+                    participant.Run.Timers.CancelAll();
+                for (var index = 0; index < captures.Count; index++)
+                {
+                    sessions.UnregisterAsync(
+                            roster[index].CharacterId,
+                            captures[index].Session)
+                        .GetAwaiter()
+                        .GetResult();
+                    captures[index].Dispose();
+                }
+            }
+        }
+
+        private static void CommitCard(
+            AntonAwakeningRewardCoordinator coordinator,
+            DungeonParticipantRosterEntry participant,
+            EnhancedClientSession session,
+            CardRewardSide side)
+        {
+            participant.Run.Effects.TryReserve(
+                CardRewardRules.GetEffectId(participant.Run, side),
+                out var reservation);
+            participant.Run.Effects.TryCommit(reservation);
+            coordinator.OnCardCommittedAsync(
+                    session,
+                    participant.Run,
+                    side)
+                .GetAwaiter()
+                .GetResult();
+        }
+
+        private static void VerifyInvalidParticipantDoesNotBlockBarrier(
+            ref int failures)
+        {
+            using (var fixture = new BarrierPartyFixture(
+                leftCharacterId: 61931,
+                rightCharacterId: 61932))
+            {
+                fixture.CommitCard(
+                    fixture.LeftParticipant,
+                    fixture.Left.Session,
+                    CardRewardSide.Free);
+                fixture.Right.Session.Player.CurrentRun = null;
+
+                var elapsed = fixture.Coordinator
+                    .MarkNormalPhaseDeadlineElapsed(
+                        fixture.Left.Session,
+                        fixture.LeftRun);
+                fixture.Coordinator.TryProjectReadyPartyAsync(
+                        fixture.Left.Session,
+                        fixture.LeftRun)
+                    .GetAwaiter()
+                    .GetResult();
+
+                var packets = fixture.Left.ReadPackets(2);
+                Check(
+                    "invalid participant does not block or receive party projection",
+                    elapsed
+                    && packets.Count == 2
+                    && fixture.Right.AvailableByteCount == 0
+                    && fixture.Instance.ParticipantEffects.GetState(
+                        fixture.ClearFact.SourceEventId,
+                        DungeonParticipantEffectAudience.Instance,
+                        fixture.LeftParticipant.RunIdentity
+                            .ParticipantIdentity,
+                        DungeonParticipantEffectKinds
+                            .AntonAwakeningRewardProjection)
+                        == DungeonParticipantEffectState.Committed
+                    && fixture.Instance.ParticipantEffects.GetState(
+                        fixture.ClearFact.SourceEventId,
+                        DungeonParticipantEffectAudience.Instance,
+                        fixture.RightParticipant.RunIdentity
+                            .ParticipantIdentity,
+                        DungeonParticipantEffectKinds
+                            .AntonAwakeningRewardProjection)
+                        == DungeonParticipantEffectState.Pending,
+                    ref failures);
+            }
+        }
+
+        private static void VerifyPaidSelectionDetachDeadlineResume(
+            ref int failures)
+        {
+            using (var fixture = new BarrierPartyFixture(
+                leftCharacterId: 61933,
+                rightCharacterId: 61934))
+            {
+                fixture.CommitCard(
+                    fixture.LeftParticipant,
+                    fixture.Left.Session,
+                    CardRewardSide.Free);
+                fixture.CommitCard(
+                    fixture.RightParticipant,
+                    fixture.Right.Session,
+                    CardRewardSide.Free);
+                var reserved = fixture.Coordinator.TryBeginPaidSelection(
+                    fixture.Left.Session,
+                    fixture.LeftRun,
+                    out var reservation);
+
+                fixture.Left.Session.Player.CurrentRun = null;
+                var elapsed = fixture.Coordinator
+                    .MarkNormalPhaseDeadlineElapsed(
+                        fixture.Right.Session,
+                        fixture.RightRun);
+                fixture.Coordinator.TryProjectReadyPartyAsync(
+                        fixture.Right.Session,
+                        fixture.RightRun)
+                    .GetAwaiter()
+                    .GetResult();
+                var rightPackets = fixture.Right.ReadPackets(2);
+
+                fixture.Left.Session.Player.CurrentRun = fixture.LeftRun;
+                fixture.Coordinator.RecoverParticipantAsync(
+                        fixture.Left.Session)
+                    .GetAwaiter()
+                    .GetResult();
+                var leftPackets = fixture.Left.ReadPackets(2);
+                var staleReservationCancelled = fixture.Coordinator
+                    .CancelPaidSelection(reservation);
+
+                Check(
+                    "paid selection detach does not block the current party",
+                    reserved
+                    && reservation.IsValid
+                    && elapsed
+                    && rightPackets.Count == 2,
+                    ref failures);
+                Check(
+                    "resume invalidates stale paid selection and projects once",
+                    leftPackets.Count == 2
+                    && !staleReservationCancelled
+                    && fixture.Instance.ParticipantEffects.GetState(
+                        fixture.ClearFact.SourceEventId,
+                        DungeonParticipantEffectAudience.Instance,
+                        fixture.LeftParticipant.RunIdentity
+                            .ParticipantIdentity,
+                        DungeonParticipantEffectKinds
+                            .AntonAwakeningRewardProjection)
+                        == DungeonParticipantEffectState.Committed
+                    && fixture.Left.AvailableByteCount == 0,
+                    ref failures);
+            }
+        }
+
+        private static void VerifyPartialProjectionRetriesOnlyFailedParticipant(
+            ref int failures)
+        {
+            using (var fixture = new BarrierPartyFixture(
+                leftCharacterId: 61941,
+                rightCharacterId: 61942,
+                sendLockTimeout: TimeSpan.FromMilliseconds(150)))
+            using (var sendLockHeld = new ManualResetEventSlim())
+            using (var releaseSendLock = new ManualResetEventSlim())
+            {
+                fixture.CommitCard(
+                    fixture.LeftParticipant,
+                    fixture.Left.Session,
+                    CardRewardSide.Free);
+                fixture.CommitCard(
+                    fixture.RightParticipant,
+                    fixture.Right.Session,
+                    CardRewardSide.Free);
+                fixture.Coordinator.MarkNormalPhaseDeadlineElapsed(
+                    fixture.Left.Session,
+                    fixture.LeftRun);
+
+                var blocker = HoldSendLock(
+                    fixture.Left.Session,
+                    sendLockHeld,
+                    releaseSendLock);
+                var lockWasHeld = sendLockHeld.Wait(
+                    TimeSpan.FromSeconds(5));
+                fixture.Coordinator.TryProjectReadyPartyAsync(
+                        fixture.Right.Session,
+                        fixture.RightRun)
+                    .GetAwaiter()
+                    .GetResult();
+                var firstRightPackets = fixture.Right.ReadPackets(2);
+                var leftFailed = fixture.Instance.ParticipantEffects.GetState(
+                        fixture.ClearFact.SourceEventId,
+                        DungeonParticipantEffectAudience.Instance,
+                        fixture.LeftParticipant.RunIdentity
+                            .ParticipantIdentity,
+                        DungeonParticipantEffectKinds
+                            .AntonAwakeningRewardProjection)
+                    == DungeonParticipantEffectState.Failed;
+                var rightCommitted = fixture.Instance.ParticipantEffects
+                    .GetState(
+                        fixture.ClearFact.SourceEventId,
+                        DungeonParticipantEffectAudience.Instance,
+                        fixture.RightParticipant.RunIdentity
+                            .ParticipantIdentity,
+                        DungeonParticipantEffectKinds
+                            .AntonAwakeningRewardProjection)
+                    == DungeonParticipantEffectState.Committed;
+
+                releaseSendLock.Set();
+                blocker.Wait(TimeSpan.FromSeconds(5));
+                fixture.Coordinator.TryProjectReadyPartyAsync(
+                        fixture.Left.Session,
+                        fixture.LeftRun)
+                    .GetAwaiter()
+                    .GetResult();
+                var retryLeftPackets = fixture.Left.ReadPackets(2);
+
+                Check(
+                    "partial party projection commits the healthy participant only",
+                    lockWasHeld
+                    && leftFailed
+                    && rightCommitted
+                    && firstRightPackets.Count == 2,
+                    ref failures);
+                Check(
+                    "projection retry sends only the previously failed participant",
+                    retryLeftPackets.Count == 2
+                    && fixture.Right.AvailableByteCount == 0
+                    && fixture.Instance.ParticipantEffects.GetState(
+                        fixture.ClearFact.SourceEventId,
+                        DungeonParticipantEffectAudience.Instance,
+                        fixture.LeftParticipant.RunIdentity
+                            .ParticipantIdentity,
+                        DungeonParticipantEffectKinds
+                            .AntonAwakeningRewardProjection)
+                        == DungeonParticipantEffectState.Committed,
+                    ref failures);
+            }
+        }
+
+        private static void VerifyNormalDeadlineTimerLifecycle(
+            ref int failures)
+        {
+            using (var fixture = new BarrierPartyFixture(
+                leftCharacterId: 61951,
+                rightCharacterId: 61952))
+            {
+                fixture.CommitCard(
+                    fixture.LeftParticipant,
+                    fixture.Left.Session,
+                    CardRewardSide.Free);
+                fixture.Right.Session.Player.CurrentRun = null;
+                var originalDeadline = DateTime.UtcNow
+                    .AddMilliseconds(250);
+                fixture.Coordinator.ScheduleNormalPhaseDeadline(
+                    fixture.Left.Session,
+                    fixture.LeftRun,
+                    originalDeadline);
+                fixture.LeftRun.Timers.TryGetCurrentTicket(
+                    DungeonRunTimerKeys.AntonAwakeningNormalCardDeadline,
+                    out var originalTicket);
+
+                var suspended = fixture.LeftRun.Timers
+                    .SuspendForNetworkDetach();
+                Thread.Sleep(100);
+                var recovered = fixture.Coordinator
+                    .RecoverNormalPhaseDeadline(fixture.Left.Session);
+                var hasRecoveredSnapshot = fixture.LeftRun.Timers
+                    .TryGetSnapshot(
+                        DungeonRunTimerKeys
+                            .AntonAwakeningNormalCardDeadline,
+                        out var recoveredSnapshot);
+                fixture.LeftRun.Timers.TryGetCurrentTicket(
+                    DungeonRunTimerKeys.AntonAwakeningNormalCardDeadline,
+                    out var recoveredTicket);
+                Thread.Sleep(170);
+                ClockService.Instance.CheckOnce(DateTime.UtcNow);
+                var projectedAtOriginalDeadline = SpinWait.SpinUntil(
+                    () => fixture.Left.AvailableByteCount > 0,
+                    TimeSpan.FromSeconds(1));
+                var packets = projectedAtOriginalDeadline
+                    ? fixture.Left.ReadPackets(2)
+                    : new List<byte[]>();
+                Thread.Sleep(100);
+
+                Check(
+                    "normal deadline detach and resume preserve the absolute deadline",
+                    suspended == 1
+                    && recovered
+                    && hasRecoveredSnapshot
+                    && recoveredSnapshot.DeadlineUtc == originalDeadline
+                    && recoveredTicket.Generation
+                        != originalTicket.Generation,
+                    ref failures);
+                Check(
+                    "resumed normal deadline projects at the preserved deadline",
+                    projectedAtOriginalDeadline
+                    && packets.Count == 2,
+                    ref failures);
+                Check(
+                    "old normal deadline ticket cannot duplicate projection",
+                    packets.Count == 2
+                    && !fixture.LeftRun.Timers.IsCurrent(originalTicket)
+                    && fixture.Left.AvailableByteCount == 0,
+                    ref failures);
+                var closedRecovery = fixture.Coordinator
+                    .RecoverNormalPhaseDeadline(fixture.Left.Session);
+                var hasClosedSnapshot = fixture.LeftRun.Timers.TryGetSnapshot(
+                    DungeonRunTimerKeys.AntonAwakeningNormalCardDeadline,
+                    out var closedSnapshot);
+                Check(
+                    "closed normal phase cannot rearm its deadline timer",
+                    !closedRecovery
+                    && hasClosedSnapshot
+                    && !closedSnapshot.HasDeadline,
+                    ref failures);
+            }
+        }
+
+        private static void VerifyMissingNormalDeadlineTimerRecovery(
+            ref int failures)
+        {
+            using (var fixture = new BarrierPartyFixture(
+                leftCharacterId: 61953,
+                rightCharacterId: 61954))
+            {
+                var runtime = fixture.Instance.Mechanisms
+                    .AntonAwakeningReward;
+                var deadline = DateTime.UtcNow.AddMinutes(1);
+                var recorded = runtime != null
+                    && runtime.TryRecordNormalDeadline(
+                        fixture.ClearFact.SourceEventId,
+                        fixture.LeftParticipant.RunIdentity
+                            .ParticipantIdentity,
+                        deadline);
+                var recovered = fixture.Coordinator
+                    .RecoverNormalPhaseDeadline(fixture.Left.Session);
+                var hasSnapshot = fixture.LeftRun.Timers.TryGetSnapshot(
+                    DungeonRunTimerKeys.AntonAwakeningNormalCardDeadline,
+                    out var snapshot);
+
+                Check(
+                    "normal deadline recovery recreates a missing timer",
+                    recorded
+                    && recovered
+                    && hasSnapshot
+                    && snapshot.DeadlineUtc == deadline
+                    && snapshot.DetachPolicy
+                        == RunTimerDetachPolicy.SuspendUntilResume,
+                    ref failures);
+            }
+        }
+
+        private static void VerifyLatePaidCardDoesNotCharge(ref int failures)
+        {
+            var path = Path.Combine(
+                Path.GetTempPath(),
+                $"dfo_anton_late_paid_{Guid.NewGuid():N}.db");
+            var sessionId = Guid.Empty;
+            const int accountId = 61920;
+            const int characterId = 61921;
+            try
+            {
+                var database = new GameDatabase(path, ServerPaths.SchemaFilePath);
+                Seed(database, accountId, characterId);
+                InventoryService inventory;
+                using (var connection = database.OpenConnection())
+                {
+                    inventory = InventoryService.LoadFromDb(
+                        connection,
+                        characterId,
+                        accountId,
+                        database);
+                }
+
+                var instance = new DungeonInstance(247, 0);
+                var run = new DungeonRun(
+                    instance,
+                    DungeonIdentityGenerator.NextRunId(),
+                    1,
+                    DungeonRunState.Active);
+                var source = DungeonEventEnvelope.Create(
+                    run,
+                    characterId,
+                    "anton-late-paid",
+                    sourceEventId: Guid.NewGuid());
+                var clearFact = instance.GetOrCreateClearedFact(
+                    new DungeonClearIntent(source, "selftest", 0),
+                    out _);
+                run.TryBeginClearCommit(clearFact);
+                run.TryCompleteClearCommit(clearFact);
+                run.Phase = DungeonRunPhase.CardsRevealed;
+                run.CardRewards = new List<ClearRewardGenerator.CardReward>
+                {
+                    default,
+                    default,
+                    default,
+                    default,
+                    default,
+                    new ClearRewardGenerator.CardReward
+                    {
+                        ItemId = 3309,
+                        StackCount = 1,
+                    },
+                    default,
+                    default,
+                };
+                run.FreeCardSlots = new byte[]
+                {
+                    0xFF, 0xFF, 0xFF, 0xFF,
+                };
+                run.PaidCardSlots = new byte[]
+                {
+                    0xFF, 0xFF, 0xFF, 0xFF,
+                };
+                run.PaidCardCost = 500;
+                var participant = new DungeonParticipantRosterEntry(
+                    characterId,
+                    421,
+                    run,
+                    run.CaptureIdentity(),
+                    new DungeonRoomIdentity(instance.Identity, 1),
+                    1,
+                    partySlot: 0);
+                var journal = instance.ParticipantEffects;
+                journal.TryFreeze(
+                    clearFact.Source,
+                    DungeonParticipantEffectAudience.Instance,
+                    new[] { participant },
+                    out _);
+                journal.TryBegin(
+                    clearFact.SourceEventId,
+                    DungeonParticipantEffectAudience.Instance,
+                    participant,
+                    DungeonParticipantEffectKinds.DungeonClear,
+                    out var clearReservation,
+                    out _);
+                journal.TryCommit(clearReservation);
+
+                var sessions = new SessionDirectory();
+                using (var capture = new ConnectedSession())
+                {
+                    capture.Session.Player.CharacterId = characterId;
+                    capture.Session.Player.UserId = 421;
+                    capture.Session.Player.CurrentRun = run;
+                    sessionId = capture.Session.SessionId;
+                    var lease = InventoryContext.Register(
+                        sessionId,
+                        characterId,
+                        inventory);
+                    lock (lease.SyncRoot)
+                        lease.Inventory.SetMainVirtualCount(0, 5000);
+                    sessions.Register(characterId, capture.Session);
+                    var rewards = CreateRewardService(
+                        new DailyResetService(database),
+                        finalItemId: 3309,
+                        quantity: 1);
+                    var anton = new AntonAwakeningRewardCoordinator(
+                        rewards,
+                        new AntonAwakeningRewardGrantService(rewards),
+                        sessions,
+                        null,
+                        new AntonNormalConquestNotificationSender(
+                            new PartyPacketSender(sessions)));
+                    anton.PrepareClearAsync(run, clearFact)
+                        .GetAwaiter()
+                        .GetResult();
+                    anton.ScheduleNormalPhaseDeadline(
+                        capture.Session,
+                        run,
+                        DateTime.UtcNow.AddMinutes(1));
+                    anton.MarkNormalPhaseDeadlineElapsed(
+                        capture.Session,
+                        run);
+                    var beforeGold = CountMainItem(lease, 0);
+                    var cards = new CardRewardCoordinator(
+                        new CardRewardService(),
+                        sessions: sessions,
+                        database: database,
+                        antonRewards: anton);
+                    cards.HandleSelectCard(
+                            capture.Session,
+                            new byte[] { 1, 0 })
+                        .GetAwaiter()
+                        .GetResult();
+                    var afterGold = CountMainItem(lease, 0);
+
+                    Check(
+                        "paid card after normal deadline is rejected before charge",
+                        beforeGold == 5000
+                        && afterGold == beforeGold
+                        && !CardRewardRules.IsCommitted(
+                            run,
+                            CardRewardSide.Paid),
+                        ref failures);
+
+                    run.Timers.CancelAll();
+                    sessions.UnregisterAsync(characterId, capture.Session)
+                        .GetAwaiter()
+                        .GetResult();
+                }
+            }
+            finally
+            {
+                if (sessionId != Guid.Empty)
+                    InventoryContext.Unregister(sessionId, characterId);
+                TryDelete(path);
+                TryDelete(path + "-wal");
+                TryDelete(path + "-shm");
+            }
+        }
+
+        private static void VerifyRejectedManualFreeKeepsAutoFlipTimer(
+            ref int failures)
+        {
+            var instance = new DungeonInstance(247, 0);
+            var run = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active);
+            run.Phase = DungeonRunPhase.CardsRevealed;
+            run.CardRewards = Enumerable.Repeat(
+                    default(ClearRewardGenerator.CardReward),
+                    8)
+                .ToList();
+            run.FreeCardSlots = new byte[] { 0, 0xFF, 0xFF, 0xFF };
+            run.PaidCardSlots = new byte[]
+            {
+                0xFF, 0xFF, 0xFF, 0xFF,
+            };
+
+            using (var capture = new ConnectedSession())
+            {
+                capture.Session.Player.CharacterId = 61955;
+                capture.Session.Player.UserId = 455;
+                capture.Session.Player.CurrentRun = run;
+                var deadline = DateTime.UtcNow.AddMinutes(1);
+                var ticket = run.Timers.Begin(
+                    DungeonRunTimerKeys.SettlementCardAutoFlow,
+                    deadline,
+                    RunTimerDetachPolicy.SuspendUntilResume);
+                var cards = new CardRewardCoordinator();
+
+                cards.HandleSelectCard(
+                        capture.Session,
+                        new byte[] { 0, 0 })
+                    .GetAwaiter()
+                    .GetResult();
+
+                Check(
+                    "occupied manual free-card slot keeps auto-flip timer",
+                    run.Timers.IsCurrent(ticket)
+                    && run.Timers.TryGetSnapshot(
+                        DungeonRunTimerKeys.SettlementCardAutoFlow,
+                        out var snapshot)
+                    && snapshot.DeadlineUtc == deadline
+                    && !CardRewardRules.IsCommitted(
+                        run,
+                        CardRewardSide.Free),
+                    ref failures);
+                run.Timers.CancelAll();
+            }
+        }
+
+        private static void VerifyCardIoRunsOutsideStateGates(
+            ref int failures)
+        {
+            var path = Path.Combine(
+                Path.GetTempPath(),
+                $"dfo_card_gate_io_{Guid.NewGuid():N}.db");
+            var sessionId = Guid.Empty;
+            const int accountId = 61960;
+            const int characterId = 61961;
+            try
+            {
+                var database = new GameDatabase(path, ServerPaths.SchemaFilePath);
+                Seed(database, accountId, characterId);
+                InventoryService inventory;
+                using (var connection = database.OpenConnection())
+                {
+                    inventory = InventoryService.LoadFromDb(
+                        connection,
+                        characterId,
+                        accountId,
+                        database);
+                }
+
+                var instance = new DungeonInstance(247, 0);
+                var run = new DungeonRun(
+                    instance,
+                    DungeonIdentityGenerator.NextRunId(),
+                    1,
+                    DungeonRunState.Active);
+                var source = DungeonEventEnvelope.Create(
+                    run,
+                    characterId,
+                    "card-io-lock-boundary",
+                    sourceEventId: Guid.NewGuid());
+                var clearFact = instance.GetOrCreateClearedFact(
+                    new DungeonClearIntent(source, "selftest", 0),
+                    out _);
+                run.TryBeginClearCommit(clearFact);
+                run.TryCompleteClearCommit(clearFact);
+                run.Phase = DungeonRunPhase.CardsRevealed;
+                run.CardRewards = new List<ClearRewardGenerator.CardReward>
+                {
+                    default,
+                    new ClearRewardGenerator.CardReward
+                    {
+                        ItemId = 3309,
+                        StackCount = 1,
+                    },
+                    default,
+                    default,
+                    default,
+                    default,
+                    default,
+                    default,
+                };
+                run.FreeCardSlots = new byte[]
+                {
+                    0xFF, 0xFF, 0xFF, 0xFF,
+                };
+                run.PaidCardSlots = new byte[]
+                {
+                    0xFF, 0xFF, 0xFF, 0xFF,
+                };
+
+                using (var capture = new ConnectedSession())
+                {
+                    capture.Session.Player.CharacterId = characterId;
+                    capture.Session.Player.UserId = 431;
+                    capture.Session.Player.CurrentRun = run;
+                    sessionId = capture.Session.SessionId;
+                    var lease = InventoryContext.Register(
+                        sessionId,
+                        characterId,
+                        inventory);
+                    var allStateGatesAvailable = true;
+                    Action observe = () =>
+                    {
+                        allStateGatesAvailable &= AreCardStateGatesAvailable(
+                            instance,
+                            run);
+                    };
+                    var sender = new GateObservingCardSender(observe);
+                    var cards = new CardRewardCoordinator(
+                        new CardRewardService(afterDurableCommit: observe),
+                        sender);
+
+                    cards.HandleSelectCard(
+                            capture.Session,
+                            new byte[] { 0, 0 })
+                        .GetAwaiter()
+                        .GetResult();
+
+                    Check(
+                        "card network, database, and inventory refresh run outside state gates",
+                        allStateGatesAvailable
+                        && sender.CardInfoCalls == 1
+                        && sender.ItemUpdateCalls == 1
+                        && CardRewardRules.IsCommitted(
+                            run,
+                            CardRewardSide.Free)
+                        && CountMainItem(lease, 3309) == 1,
+                        ref failures);
+                }
+            }
+            finally
+            {
+                if (sessionId != Guid.Empty)
+                    InventoryContext.Unregister(sessionId, characterId);
+                TryDelete(path);
+                TryDelete(path + "-wal");
+                TryDelete(path + "-shm");
+            }
+        }
+
+        private static bool AreCardStateGatesAvailable(
+            DungeonInstance instance,
+            DungeonRun run)
+        {
+            var instanceGateAvailable = instance.CardRewardProjectionGate
+                .Wait(0);
+            if (instanceGateAvailable)
+                instance.CardRewardProjectionGate.Release();
+            var runGateAvailable = run.Settlement.CardProjectionGate.Wait(0);
+            if (runGateAvailable)
+                run.Settlement.CardProjectionGate.Release();
+            var runSyncAvailable = Monitor.TryEnter(run.SyncRoot);
+            if (runSyncAvailable)
+                Monitor.Exit(run.SyncRoot);
+            return instanceGateAvailable
+                && runGateAvailable
+                && runSyncAvailable;
+        }
+
+        private static void VerifyConcurrentEplpRevealKeepsCommand(
+            ref int failures)
+        {
+            var instance = new DungeonInstance(1, 0);
+            var run = new DungeonRun(
+                instance,
+                DungeonIdentityGenerator.NextRunId(),
+                1,
+                DungeonRunState.Active)
+            {
+                Phase = DungeonRunPhase.ResultShown,
+                CardRewards = Enumerable.Repeat(
+                        default(ClearRewardGenerator.CardReward),
+                        8)
+                    .ToList(),
+                FreeCardSlots = new byte[]
+                {
+                    0xFF, 0xFF, 0xFF, 0xFF,
+                },
+                PaidCardSlots = new byte[]
+                {
+                    0xFF, 0xFF, 0xFF, 0xFF,
+                },
+            };
+            using (var capture = new ConnectedSession())
+            using (var sender = new BlockingLayoutCardSender())
+            {
+                capture.Session.Player.CharacterId = 61969;
+                capture.Session.Player.UserId = 469;
+                capture.Session.Player.CurrentRun = run;
+                var cards = new CardRewardCoordinator(sender: sender);
+                var firstReveal = System.Threading.Tasks.Task.Run(
+                    async () => await cards.HandleCardStartRequest(
+                        capture.Session));
+                var firstEntered = sender.Entered.Wait(
+                    TimeSpan.FromSeconds(5));
+                var eplp = cards.PrepareEplpCommand(
+                    capture.Session,
+                    new byte[] { 1, 2 });
+                sender.Release.Set();
+                System.Threading.Tasks.Task.WaitAll(firstReveal, eplp);
+                var decision = eplp.Result;
+
+                Check(
+                    "concurrent card reveal does not swallow the pending EPLP command",
+                    firstEntered
+                    && run.SettlementState
+                        == DungeonSettlementState.CardsRevealed
+                    && decision.Ready
+                    && decision.State == 1
+                    && decision.Option == 2,
+                    ref failures);
+                run.Timers.CancelAll();
+            }
         }
 
         private static void VerifyPartyPacketBatchIsolation(
@@ -890,7 +2164,8 @@ namespace DfoServer.SelfTests
                     new AntonAwakeningRewardGrantService(rewards),
                     sessions,
                     null,
-                    new AntonNormalConquestNotificationSender());
+                    new AntonNormalConquestNotificationSender(
+                        new PartyPacketSender(sessions)));
                 coordinator.PrepareClearAsync(run, clearFact)
                     .GetAwaiter()
                     .GetResult();
@@ -903,6 +2178,12 @@ namespace DfoServer.SelfTests
                         participant.RunIdentity.ParticipantIdentity,
                         frozenDeadline);
                 coordinator.OnFreeCardCommittedAsync(capture.Session, run)
+                    .GetAwaiter()
+                    .GetResult();
+                coordinator.MarkNormalPhaseDeadlineElapsed(
+                    capture.Session,
+                    run);
+                coordinator.TryProjectReadyPartyAsync(capture.Session, run)
                     .GetAwaiter()
                     .GetResult();
 
@@ -1018,13 +2299,20 @@ namespace DfoServer.SelfTests
                         new AntonAwakeningRewardGrantService(daily),
                         sessions,
                         null,
-                        new AntonNormalConquestNotificationSender(),
+                        new AntonNormalConquestNotificationSender(
+                            new PartyPacketSender(sessions)),
                         postRevealGrantDelay: TimeSpan.FromMilliseconds(300));
 
                     coordinator.PrepareClearAsync(run, clearFact)
                         .GetAwaiter()
                         .GetResult();
                     coordinator.OnFreeCardCommittedAsync(capture.Session, run)
+                        .GetAwaiter()
+                        .GetResult();
+                    coordinator.MarkNormalPhaseDeadlineElapsed(
+                        capture.Session,
+                        run);
+                    coordinator.TryProjectReadyPartyAsync(capture.Session, run)
                         .GetAwaiter()
                         .GetResult();
                     var projectionPackets = capture.ReadPackets(2);
@@ -1062,6 +2350,9 @@ namespace DfoServer.SelfTests
                         ref failures);
 
                     coordinator.OnFreeCardCommittedAsync(capture.Session, run)
+                        .GetAwaiter()
+                        .GetResult();
+                    coordinator.TryProjectReadyPartyAsync(capture.Session, run)
                         .GetAwaiter()
                         .GetResult();
                     Thread.Sleep(100);
@@ -1145,13 +2436,17 @@ namespace DfoServer.SelfTests
                     new AntonAwakeningRewardGrantService(rewards),
                     sessions,
                     null,
-                    new AntonNormalConquestNotificationSender());
+                    new AntonNormalConquestNotificationSender(
+                        new PartyPacketSender(sessions)));
 
                 coordinator.PrepareClearAsync(run, clearFact)
                     .GetAwaiter()
                     .GetResult();
                 var runtime = instance.Mechanisms.AntonAwakeningReward;
                 coordinator.OnFreeCardCommittedAsync(capture.Session, run)
+                    .GetAwaiter()
+                    .GetResult();
+                coordinator.TryProjectReadyPartyAsync(capture.Session, run)
                     .GetAwaiter()
                     .GetResult();
                 Check(
@@ -1177,6 +2472,16 @@ namespace DfoServer.SelfTests
                 run.Effects.TryCommit(freeReservation);
                 var projectedAt = DateTime.UtcNow;
                 coordinator.OnFreeCardCommittedAsync(capture.Session, run)
+                    .GetAwaiter()
+                    .GetResult();
+                Check(
+                    "manual free-card commit cannot project before normal deadline",
+                    capture.AvailableByteCount == 0,
+                    ref failures);
+                coordinator.MarkNormalPhaseDeadlineElapsed(
+                    capture.Session,
+                    run);
+                coordinator.TryProjectReadyPartyAsync(capture.Session, run)
                     .GetAwaiter()
                     .GetResult();
                 var packets = capture.ReadPackets(2);
@@ -1214,6 +2519,9 @@ namespace DfoServer.SelfTests
                     ref failures);
 
                 coordinator.OnFreeCardCommittedAsync(capture.Session, run)
+                    .GetAwaiter()
+                    .GetResult();
+                coordinator.TryProjectReadyPartyAsync(capture.Session, run)
                     .GetAwaiter()
                     .GetResult();
                 Check(
@@ -1473,6 +2781,57 @@ namespace DfoServer.SelfTests
                         .IsCurrentParticipantSession(
                             capture.Session,
                             roster[1]),
+                    ref failures);
+            }
+        }
+
+        private static void VerifyEndingRunDoesNotRearmGrantTimer(
+            ref int failures)
+        {
+            using (var fixture = new BarrierPartyFixture(
+                leftCharacterId: 62011,
+                rightCharacterId: 62012))
+            {
+                fixture.CommitCard(
+                    fixture.LeftParticipant,
+                    fixture.Left.Session,
+                    CardRewardSide.Free);
+                fixture.CommitCard(
+                    fixture.RightParticipant,
+                    fixture.Right.Session,
+                    CardRewardSide.Free);
+                fixture.Coordinator.MarkNormalPhaseDeadlineElapsed(
+                    fixture.Left.Session,
+                    fixture.LeftRun);
+                fixture.Coordinator.TryProjectReadyPartyAsync(
+                        fixture.Left.Session,
+                        fixture.LeftRun)
+                    .GetAwaiter()
+                    .GetResult();
+                fixture.Left.ReadPackets(2);
+                fixture.Right.ReadPackets(2);
+                var hadGrantTimer = fixture.LeftRun.Timers
+                    .TryGetSnapshot(
+                        DungeonRunTimerKeys.AntonAwakeningPostRevealGrant,
+                        out var armedSnapshot)
+                    && armedSnapshot.HasDeadline;
+
+                fixture.LeftRun.Timers.CancelAll();
+                var ending = fixture.LeftRun.TryBeginEnding();
+                fixture.Coordinator.TryProjectReadyPartyAsync(
+                        fixture.Left.Session,
+                        fixture.LeftRun)
+                    .GetAwaiter()
+                    .GetResult();
+
+                Check(
+                    "ending run cannot rearm a cancelled Anton grant timer",
+                    hadGrantTimer
+                    && ending
+                    && fixture.LeftRun.Timers.TryGetSnapshot(
+                        DungeonRunTimerKeys.AntonAwakeningPostRevealGrant,
+                        out var cancelledSnapshot)
+                    && !cancelledSnapshot.HasDeadline,
                     ref failures);
             }
         }
@@ -1884,21 +3243,8 @@ namespace DfoServer.SelfTests
 
         private static int CountMainItem(InventoryLease lease, int itemId)
         {
-            var count = 0;
             lock (lease.SyncRoot)
-            {
-                for (var slot = InventoryService.MainSlotStart;
-                     slot <= InventoryService.MainSlotEnd;
-                     slot++)
-                {
-                    var core = lease.Inventory.GetItem(
-                        InventoryListType.Main,
-                        slot);
-                    if (core?.ItemId == itemId)
-                        count += core.Count;
-                }
-            }
-            return count;
+                return lease.Inventory.CountMainItem(itemId);
         }
 
         private static void Seed(
@@ -1939,6 +3285,252 @@ VALUES (@cid, @aid, @name, 0);";
             catch
             {
                 // SQLite may still be releasing a test handle.
+            }
+        }
+
+        private sealed class BarrierPartyFixture : IDisposable
+        {
+            internal BarrierPartyFixture(
+                int leftCharacterId,
+                int rightCharacterId,
+                TimeSpan? sendLockTimeout = null,
+                bool prepareImmediately = true)
+            {
+                Instance = new DungeonInstance(247, 0);
+                LeftRun = new DungeonRun(
+                    Instance,
+                    DungeonIdentityGenerator.NextRunId(),
+                    1,
+                    DungeonRunState.Active);
+                RightRun = new DungeonRun(
+                    Instance,
+                    DungeonIdentityGenerator.NextRunId(),
+                    1,
+                    DungeonRunState.Active);
+                var source = DungeonEventEnvelope.Create(
+                    LeftRun,
+                    leftCharacterId,
+                    "anton-barrier-fixture",
+                    sourceEventId: Guid.NewGuid());
+                ClearFact = Instance.GetOrCreateClearedFact(
+                    new DungeonClearIntent(source, "selftest", 0),
+                    out _);
+                LeftRun.TryBeginClearCommit(ClearFact);
+                LeftRun.TryCompleteClearCommit(ClearFact);
+                RightRun.TryBeginClearCommit(ClearFact);
+                RightRun.TryCompleteClearCommit(ClearFact);
+                var room = new DungeonRoomIdentity(Instance.Identity, 1);
+                LeftParticipant = new DungeonParticipantRosterEntry(
+                    leftCharacterId,
+                    441,
+                    LeftRun,
+                    LeftRun.CaptureIdentity(),
+                    room,
+                    1,
+                    partySlot: 0);
+                RightParticipant = new DungeonParticipantRosterEntry(
+                    rightCharacterId,
+                    442,
+                    RightRun,
+                    RightRun.CaptureIdentity(),
+                    room,
+                    1,
+                    partySlot: 1);
+                var roster = new[]
+                {
+                    LeftParticipant,
+                    RightParticipant,
+                };
+                var journal = Instance.ParticipantEffects;
+                journal.TryFreeze(
+                    ClearFact.Source,
+                    DungeonParticipantEffectAudience.Instance,
+                    roster,
+                    out _);
+                foreach (var participant in roster)
+                {
+                    journal.TryBegin(
+                        ClearFact.SourceEventId,
+                        DungeonParticipantEffectAudience.Instance,
+                        participant,
+                        DungeonParticipantEffectKinds.DungeonClear,
+                        out var clearReservation,
+                        out _);
+                    journal.TryCommit(clearReservation);
+                }
+
+                Sessions = new SessionDirectory();
+                Left = new ConnectedSession();
+                Right = new ConnectedSession();
+                Left.Session.Player.CharacterId = leftCharacterId;
+                Left.Session.Player.UserId =
+                    LeftParticipant.ParticipantUserId;
+                Left.Session.Player.CurrentRun = LeftRun;
+                Right.Session.Player.CharacterId = rightCharacterId;
+                Right.Session.Player.UserId =
+                    RightParticipant.ParticipantUserId;
+                Right.Session.Player.CurrentRun = RightRun;
+                Sessions.Register(leftCharacterId, Left.Session);
+                Sessions.Register(rightCharacterId, Right.Session);
+
+                var rewards = CreateRewardService(
+                    dailyReset: null,
+                    finalItemId: 3309,
+                    quantity: 2);
+                Coordinator = new AntonAwakeningRewardCoordinator(
+                    rewards,
+                    new AntonAwakeningRewardGrantService(rewards),
+                    Sessions,
+                    null,
+                    new AntonNormalConquestNotificationSender(
+                        new PartyPacketSender(
+                            Sessions,
+                            sendLockTimeout)));
+                if (prepareImmediately)
+                    Prepare();
+            }
+
+            internal DungeonInstance Instance { get; }
+            internal DungeonRun LeftRun { get; }
+            internal DungeonRun RightRun { get; }
+            internal DungeonClearedFact ClearFact { get; }
+            internal DungeonParticipantRosterEntry LeftParticipant { get; }
+            internal DungeonParticipantRosterEntry RightParticipant { get; }
+            internal SessionDirectory Sessions { get; }
+            internal ConnectedSession Left { get; }
+            internal ConnectedSession Right { get; }
+            internal AntonAwakeningRewardCoordinator Coordinator { get; }
+
+            internal void Prepare()
+            {
+                Coordinator.PrepareClearAsync(LeftRun, ClearFact)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+
+            internal void CommitCard(
+                DungeonParticipantRosterEntry participant,
+                EnhancedClientSession session,
+                CardRewardSide side)
+            {
+                participant.Run.Effects.TryReserve(
+                    CardRewardRules.GetEffectId(participant.Run, side),
+                    out var reservation);
+                participant.Run.Effects.TryCommit(reservation);
+                Coordinator.OnCardCommittedAsync(
+                        session,
+                        participant.Run,
+                        side)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+
+            public void Dispose()
+            {
+                LeftRun.Timers.CancelAll();
+                RightRun.Timers.CancelAll();
+                Sessions.UnregisterAsync(
+                        LeftParticipant.CharacterId,
+                        Left.Session)
+                    .GetAwaiter()
+                    .GetResult();
+                Sessions.UnregisterAsync(
+                        RightParticipant.CharacterId,
+                        Right.Session)
+                    .GetAwaiter()
+                    .GetResult();
+                Left.Dispose();
+                Right.Dispose();
+            }
+        }
+
+        private sealed class GateObservingCardSender
+            : ICardRewardNotificationSender
+        {
+            private readonly Action _observe;
+
+            internal GateObservingCardSender(Action observe)
+            {
+                _observe = observe ?? throw new ArgumentNullException(
+                    nameof(observe));
+            }
+
+            internal int CardInfoCalls { get; private set; }
+            internal int ItemUpdateCalls { get; private set; }
+
+            public System.Threading.Tasks.Task SendLayoutAsync(
+                EnhancedClientSession session,
+                CardRewardPartyProjection projection)
+            {
+                _observe();
+                return System.Threading.Tasks.Task.CompletedTask;
+            }
+
+            public System.Threading.Tasks.Task SendCardInfoAsync(
+                EnhancedClientSession session,
+                CardRewardPartyProjection projection)
+            {
+                _observe();
+                CardInfoCalls++;
+                return System.Threading.Tasks.Task.CompletedTask;
+            }
+
+            public System.Threading.Tasks.Task SendExitAsync(
+                EnhancedClientSession session,
+                byte state,
+                byte option)
+            {
+                _observe();
+                return System.Threading.Tasks.Task.CompletedTask;
+            }
+
+            public System.Threading.Tasks.Task SendItemUpdatesAsync(
+                EnhancedClientSession session,
+                IReadOnlyList<InventorySlotMutation> changes)
+            {
+                _observe();
+                ItemUpdateCalls++;
+                return System.Threading.Tasks.Task.CompletedTask;
+            }
+        }
+
+        private sealed class BlockingLayoutCardSender
+            : ICardRewardNotificationSender, IDisposable
+        {
+            internal ManualResetEventSlim Entered { get; } = new ManualResetEventSlim();
+            internal ManualResetEventSlim Release { get; } = new ManualResetEventSlim();
+
+            public System.Threading.Tasks.Task SendLayoutAsync(
+                EnhancedClientSession session,
+                CardRewardPartyProjection projection)
+            {
+                Entered.Set();
+                if (!Release.Wait(TimeSpan.FromSeconds(5)))
+                    throw new TimeoutException("layout release was not signaled");
+                return System.Threading.Tasks.Task.CompletedTask;
+            }
+
+            public System.Threading.Tasks.Task SendCardInfoAsync(
+                EnhancedClientSession session,
+                CardRewardPartyProjection projection)
+                => System.Threading.Tasks.Task.CompletedTask;
+
+            public System.Threading.Tasks.Task SendExitAsync(
+                EnhancedClientSession session,
+                byte state,
+                byte option)
+                => System.Threading.Tasks.Task.CompletedTask;
+
+            public System.Threading.Tasks.Task SendItemUpdatesAsync(
+                EnhancedClientSession session,
+                IReadOnlyList<InventorySlotMutation> changes)
+                => System.Threading.Tasks.Task.CompletedTask;
+
+            public void Dispose()
+            {
+                Release.Set();
+                Entered.Dispose();
+                Release.Dispose();
             }
         }
 

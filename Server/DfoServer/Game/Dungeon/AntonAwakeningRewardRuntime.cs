@@ -6,6 +6,43 @@ using DfoServer.GameWorld;
 
 namespace DfoServer.Game.Dungeon
 {
+    internal enum AntonPaidCardState
+    {
+        Pending = 0,
+        Committed = 1,
+        Skipped = 2,
+    }
+
+    internal sealed class AntonNormalCardParticipantState
+    {
+        internal bool FreeCommitted { get; set; }
+        internal AntonPaidCardState PaidState { get; set; }
+        internal bool PaidSelectionInFlight { get; set; }
+        internal int PaidSelectionGeneration { get; set; }
+        internal DateTime DeadlineUtc { get; set; }
+        internal bool DeadlineElapsed { get; set; }
+    }
+
+    internal readonly struct AntonPaidSelectionTicket
+    {
+        internal AntonPaidSelectionTicket(
+            Guid sourceEventId,
+            DungeonParticipantRunIdentity participant,
+            int generation)
+        {
+            SourceEventId = sourceEventId;
+            Participant = participant;
+            Generation = generation;
+        }
+
+        internal Guid SourceEventId { get; }
+        internal DungeonParticipantRunIdentity Participant { get; }
+        internal int Generation { get; }
+        internal bool IsValid => SourceEventId != Guid.Empty
+            && Participant.IsValid
+            && Generation != 0;
+    }
+
     internal sealed class AntonAwakeningRewardPlanEntry
     {
         internal AntonAwakeningRewardPlanEntry(
@@ -114,6 +151,31 @@ namespace DfoServer.Game.Dungeon
     // the caller must evaluate a reservation outside every aggregate gate.
     internal sealed class AntonAwakeningRewardRuntime
     {
+        private sealed class NormalCardBarrierState
+        {
+            internal NormalCardBarrierState(
+                IReadOnlyList<DungeonParticipantRosterEntry> roster)
+            {
+                Roster = roster;
+                Participants = roster.ToDictionary(
+                    value => value.RunIdentity.ParticipantIdentity,
+                    _ => new AntonNormalCardParticipantState());
+            }
+
+            internal IReadOnlyList<DungeonParticipantRosterEntry> Roster
+            {
+                get;
+            }
+
+            internal Dictionary<
+                DungeonParticipantRunIdentity,
+                AntonNormalCardParticipantState> Participants { get; }
+
+            internal DateTime DeadlineUtc { get; set; }
+            internal bool NormalCardPhaseClosed { get; set; }
+            internal bool SpecialProjectionReady { get; set; }
+        }
+
         private readonly object _syncRoot = new object();
         private readonly Dictionary<Guid, AntonAwakeningRewardPlanCreation>
             _planCreations =
@@ -134,6 +196,354 @@ namespace DfoServer.Game.Dungeon
                     Guid,
                     DungeonParticipantRunIdentity),
                     DateTime>();
+        private readonly Dictionary<Guid, NormalCardBarrierState>
+            _normalCardBarriers =
+                new Dictionary<Guid, NormalCardBarrierState>();
+
+        internal bool TryRegisterNormalCardBarrier(
+            Guid sourceEventId,
+            IReadOnlyList<DungeonParticipantRosterEntry> roster)
+        {
+            if (sourceEventId == Guid.Empty
+                || roster == null
+                || roster.Count == 0
+                || roster.Any(value => value == null
+                    || !value.RunIdentity.ParticipantIdentity.IsValid))
+            {
+                return false;
+            }
+
+            var frozen = roster.ToList().AsReadOnly();
+            if (frozen.Select(value =>
+                    value.RunIdentity.ParticipantIdentity)
+                .Distinct()
+                .Count() != frozen.Count)
+            {
+                return false;
+            }
+
+            lock (_syncRoot)
+            {
+                if (_normalCardBarriers.TryGetValue(
+                        sourceEventId,
+                        out var existing))
+                {
+                    return SameRoster(existing.Roster, frozen);
+                }
+
+                _normalCardBarriers.Add(
+                    sourceEventId,
+                    new NormalCardBarrierState(frozen));
+                return true;
+            }
+        }
+
+        internal bool TryGetNormalCardRoster(
+            Guid sourceEventId,
+            out IReadOnlyList<DungeonParticipantRosterEntry> roster)
+        {
+            lock (_syncRoot)
+            {
+                if (_normalCardBarriers.TryGetValue(
+                        sourceEventId,
+                        out var barrier))
+                {
+                    roster = barrier.Roster;
+                    return true;
+                }
+            }
+
+            roster = Array.Empty<DungeonParticipantRosterEntry>();
+            return false;
+        }
+
+        internal bool TryRecordNormalDeadline(
+            Guid sourceEventId,
+            DungeonParticipantRunIdentity participant,
+            DateTime deadlineUtc)
+        {
+            deadlineUtc = NormalizeUtc(deadlineUtc);
+            if (sourceEventId == Guid.Empty
+                || !participant.IsValid
+                || deadlineUtc == DateTime.MinValue)
+            {
+                return false;
+            }
+
+            lock (_syncRoot)
+            {
+                if (!_normalCardBarriers.TryGetValue(
+                        sourceEventId,
+                        out var barrier)
+                    || barrier.NormalCardPhaseClosed
+                    || !barrier.Participants.ContainsKey(participant))
+                {
+                    return false;
+                }
+
+                if (barrier.DeadlineUtc == DateTime.MinValue)
+                {
+                    barrier.DeadlineUtc = deadlineUtc;
+                    foreach (var state in barrier.Participants.Values)
+                        state.DeadlineUtc = deadlineUtc;
+                }
+                return true;
+            }
+        }
+
+        internal bool TryGetNormalDeadline(
+            Guid sourceEventId,
+            DungeonParticipantRunIdentity participant,
+            out DateTime deadlineUtc)
+        {
+            lock (_syncRoot)
+            {
+                if (_normalCardBarriers.TryGetValue(
+                        sourceEventId,
+                        out var barrier)
+                    && barrier.Participants.TryGetValue(
+                        participant,
+                        out var state)
+                    && state.DeadlineUtc != DateTime.MinValue)
+                {
+                    deadlineUtc = state.DeadlineUtc;
+                    return true;
+                }
+            }
+
+            deadlineUtc = DateTime.MinValue;
+            return false;
+        }
+
+        internal bool IsNormalCardPhaseClosed(Guid sourceEventId)
+        {
+            lock (_syncRoot)
+            {
+                return _normalCardBarriers.TryGetValue(
+                           sourceEventId,
+                           out var barrier)
+                    && barrier.NormalCardPhaseClosed;
+            }
+        }
+
+        internal bool TryBeginPaidSelection(
+            Guid sourceEventId,
+            DungeonParticipantRunIdentity participant,
+            out AntonPaidSelectionTicket ticket)
+        {
+            ticket = default;
+            lock (_syncRoot)
+            {
+                if (!_normalCardBarriers.TryGetValue(
+                        sourceEventId,
+                        out var barrier)
+                    || barrier.NormalCardPhaseClosed
+                    || !barrier.Participants.TryGetValue(
+                        participant,
+                        out var state)
+                    || state.PaidState != AntonPaidCardState.Pending
+                    || state.PaidSelectionInFlight)
+                {
+                    return false;
+                }
+
+                state.PaidSelectionGeneration = NextGeneration(
+                    state.PaidSelectionGeneration);
+                state.PaidSelectionInFlight = true;
+                ticket = new AntonPaidSelectionTicket(
+                    sourceEventId,
+                    participant,
+                    state.PaidSelectionGeneration);
+                return true;
+            }
+        }
+
+        internal bool TryCancelPaidSelection(
+            AntonPaidSelectionTicket ticket)
+        {
+            if (!ticket.IsValid)
+                return false;
+
+            lock (_syncRoot)
+            {
+                if (!_normalCardBarriers.TryGetValue(
+                        ticket.SourceEventId,
+                        out var barrier)
+                    || !barrier.Participants.TryGetValue(
+                        ticket.Participant,
+                        out var state)
+                    || state.PaidState != AntonPaidCardState.Pending
+                    || !state.PaidSelectionInFlight
+                    || state.PaidSelectionGeneration != ticket.Generation)
+                {
+                    return false;
+                }
+
+                state.PaidSelectionInFlight = false;
+                if (barrier.NormalCardPhaseClosed)
+                    state.PaidState = AntonPaidCardState.Skipped;
+                return true;
+            }
+        }
+
+        internal bool TryRecoverPaidSelection(
+            Guid sourceEventId,
+            DungeonParticipantRunIdentity participant)
+        {
+            lock (_syncRoot)
+            {
+                if (!_normalCardBarriers.TryGetValue(
+                        sourceEventId,
+                        out var barrier)
+                    || !barrier.Participants.TryGetValue(
+                        participant,
+                        out var state)
+                    || state.PaidState != AntonPaidCardState.Pending)
+                {
+                    return false;
+                }
+
+                if (state.PaidSelectionInFlight)
+                {
+                    state.PaidSelectionInFlight = false;
+                    state.PaidSelectionGeneration = NextGeneration(
+                        state.PaidSelectionGeneration);
+                }
+                if (barrier.NormalCardPhaseClosed)
+                    state.PaidState = AntonPaidCardState.Skipped;
+                return true;
+            }
+        }
+
+        internal bool TryMarkCardCommitted(
+            Guid sourceEventId,
+            DungeonParticipantRunIdentity participant,
+            CardRewardSide side)
+        {
+            lock (_syncRoot)
+            {
+                if (!_normalCardBarriers.TryGetValue(
+                        sourceEventId,
+                        out var barrier)
+                    || !barrier.Participants.TryGetValue(
+                        participant,
+                        out var state))
+                {
+                    return false;
+                }
+
+                if (side == CardRewardSide.Free)
+                    state.FreeCommitted = true;
+                else
+                {
+                    state.PaidState = AntonPaidCardState.Committed;
+                    state.PaidSelectionInFlight = false;
+                }
+                return true;
+            }
+        }
+
+        internal bool TryMarkDeadlineElapsed(
+            Guid sourceEventId,
+            DungeonParticipantRunIdentity participant)
+        {
+            lock (_syncRoot)
+            {
+                if (!_normalCardBarriers.TryGetValue(
+                        sourceEventId,
+                        out var barrier)
+                    || !barrier.Participants.ContainsKey(participant))
+                {
+                    return false;
+                }
+
+                barrier.NormalCardPhaseClosed = true;
+                foreach (var state in barrier.Participants.Values)
+                {
+                    state.DeadlineElapsed = true;
+                    if (state.PaidState == AntonPaidCardState.Pending
+                        && !state.PaidSelectionInFlight)
+                    {
+                        state.PaidState = AntonPaidCardState.Skipped;
+                    }
+                }
+                return true;
+            }
+        }
+
+        internal bool IsPaidSelectionOpen(
+            Guid sourceEventId,
+            DungeonParticipantRunIdentity participant)
+        {
+            lock (_syncRoot)
+            {
+                return _normalCardBarriers.TryGetValue(
+                           sourceEventId,
+                           out var barrier)
+                    && !barrier.NormalCardPhaseClosed
+                    && barrier.Participants.TryGetValue(
+                        participant,
+                        out var state)
+                    && state.PaidState == AntonPaidCardState.Pending
+                    && !state.PaidSelectionInFlight;
+            }
+        }
+
+        internal bool AreAllCurrentParticipantsReady(
+            Guid sourceEventId,
+            Func<DungeonParticipantRosterEntry, bool> isCurrent)
+        {
+            if (isCurrent == null)
+                return false;
+
+            IReadOnlyList<DungeonParticipantRosterEntry> roster;
+            lock (_syncRoot)
+            {
+                if (!_normalCardBarriers.TryGetValue(
+                        sourceEventId,
+                        out var barrier))
+                {
+                    return false;
+                }
+                roster = barrier.Roster;
+            }
+
+            var currentIdentities = roster
+                .Where(isCurrent)
+                .Select(value => value.RunIdentity.ParticipantIdentity)
+                .ToList();
+            if (currentIdentities.Count == 0)
+                return false;
+
+            lock (_syncRoot)
+            {
+                if (!_normalCardBarriers.TryGetValue(
+                        sourceEventId,
+                        out var barrier)
+                    || !barrier.NormalCardPhaseClosed)
+                {
+                    return false;
+                }
+
+                foreach (var identity in currentIdentities)
+                {
+                    if (!barrier.Participants.TryGetValue(
+                            identity,
+                            out var state)
+                        || !state.DeadlineElapsed
+                        || !state.FreeCommitted
+                        || (state.PaidState != AntonPaidCardState.Committed
+                            && state.PaidState
+                                != AntonPaidCardState.Skipped))
+                    {
+                        return false;
+                    }
+                }
+
+                barrier.SpecialProjectionReady = true;
+                return true;
+            }
+        }
 
         internal bool TryGetOrRegisterPlanCreation(
             Guid sourceEventId,
@@ -260,10 +670,9 @@ namespace DfoServer.Game.Dungeon
             if (sourceEventId == Guid.Empty
                 || !participant.IsValid
                 || deadlineUtc == DateTime.MinValue
-                || !TryGetPlan(sourceEventId, out var plan)
-                || !plan.Entries.Any(value =>
-                    value.Participant.RunIdentity.ParticipantIdentity
-                        .Equals(participant)))
+                || !ContainsProjectionParticipant(
+                    sourceEventId,
+                    participant))
             {
                 return false;
             }
@@ -378,6 +787,57 @@ namespace DfoServer.Game.Dungeon
                 resolution);
         }
 
+        private static bool SameRoster(
+            IReadOnlyList<DungeonParticipantRosterEntry> left,
+            IReadOnlyList<DungeonParticipantRosterEntry> right)
+        {
+            if (ReferenceEquals(left, right))
+                return true;
+            if (left == null || right == null || left.Count != right.Count)
+                return false;
+            for (var index = 0; index < left.Count; index++)
+            {
+                if (!left[index].RunIdentity.ParticipantIdentity.Equals(
+                        right[index].RunIdentity.ParticipantIdentity)
+                    || left[index].CharacterId != right[index].CharacterId
+                    || left[index].ParticipantUserId
+                        != right[index].ParticipantUserId)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private bool ContainsProjectionParticipant(
+            Guid sourceEventId,
+            DungeonParticipantRunIdentity participant)
+        {
+            lock (_syncRoot)
+            {
+                if (_normalCardBarriers.TryGetValue(
+                        sourceEventId,
+                        out var barrier)
+                    && barrier.Participants.ContainsKey(participant))
+                {
+                    return true;
+                }
+
+                if (!_planCreations.TryGetValue(
+                        sourceEventId,
+                        out var creation)
+                    || !creation.TryGetPublished(out var outcome)
+                    || outcome.Plan == null)
+                {
+                    return false;
+                }
+
+                return outcome.Plan.Entries.Any(value =>
+                    value.Participant.RunIdentity.ParticipantIdentity
+                        .Equals(participant));
+            }
+        }
+
         private static DateTime NormalizeUtc(DateTime value)
         {
             if (value == DateTime.MinValue || value.Kind == DateTimeKind.Utc)
@@ -385,6 +845,12 @@ namespace DfoServer.Game.Dungeon
             return value.Kind == DateTimeKind.Local
                 ? value.ToUniversalTime()
                 : DateTime.SpecifyKind(value, DateTimeKind.Utc);
+        }
+
+        private static int NextGeneration(int previous)
+        {
+            var next = previous == int.MaxValue ? 1 : previous + 1;
+            return next == 0 ? 1 : next;
         }
     }
 }
