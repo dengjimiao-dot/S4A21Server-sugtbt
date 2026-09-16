@@ -619,9 +619,12 @@ namespace DfoServer.Infrastructure
                 core.CharacterRepository,
                 world.Sessions,
                 world.RaidManager);
+            party.AttachRaidHandler(raid);
+            raid.RaidPeerRequestAsync = party.RequestRaidPeerAsync;
             var chat = new ChatHandler(
                 world.Sessions,
-                world.PartyManager);
+                world.PartyManager,
+                world.RaidManager);
             townDungeon.Town.ConfigureDungeonGiveupPartyDeparture(
                 party.HandleDungeonGiveupWithinTransitionAsync);
             townDungeon.Town.ConfigureTownPartyListPublisher(

@@ -205,6 +205,7 @@ namespace DfoServer.Network
             _mercenaryHandler = featureHandlers.Mercenary;
             _partyHandler = socialHandlers.Party;
             _raidHandler = socialHandlers.Raid;
+            _townHandler.ConfigureRaidTownAreaChanged(_raidHandler.HandleRaidTownAreaChangedAsync);
             _chatHandler = socialHandlers.Chat;
             _dungeonRejoin = socialHandlers.DungeonRejoin;
             _dungeonLoading = socialHandlers.DungeonLoading;
@@ -270,8 +271,14 @@ namespace DfoServer.Network
         public override async Task OnClientDisconnected(
             EnhancedClientSession session)
         {
-            _raidHandler.ClearSession(session.SessionId);
-            await _characterSessionLifecycle.HandleDisconnectedAsync(session);
+            try
+            {
+                await _raidHandler.ClearSessionAsync(session.SessionId);
+            }
+            finally
+            {
+                await _characterSessionLifecycle.HandleDisconnectedAsync(session);
+            }
         }
 
         public override async Task OnPacketReceived(EnhancedClientSession session, FlexiblePacket packet)
@@ -321,8 +328,12 @@ namespace DfoServer.Network
 
         private void RegisterCharacterHandlers(GameCommandRegistry.GameCommandRegistrationGroup d)
         {
-            d[0x0004] =
-                _characterSessionLifecycle.HandleSelectCharacterAsync;
+            d[0x0004] = async (s, h, b) =>
+            {
+                await _characterSessionLifecycle.HandleSelectCharacterAsync(s, h, b);
+                await _raidHandler.HandleRaidChannelWelcomeAsync(s);
+                await _raidHandler.HandleRebindResyncAsync(s);
+            };
             d[0x0005] = _characterSelectHandler.Handle_ENUM_CMDPACKET_CREATE_CHARACTER;
             d[0x0006] = _characterSelectHandler.Handle_ENUM_CMDPACKET_DELETE_CHARACTER;
             d[0x0007] = _characterSessionLifecycle
@@ -346,15 +357,7 @@ namespace DfoServer.Network
             d[(ushort)CmdPacketType.SEND_MESSAGE] =
                 _chatHandler.Handle_SEND_MESSAGE;
             d[0x000C] = _partyHandler.Handle_SET_PARTY_INFO;        // 12 创建/更新队伍
-            d[0x000D] = async (s, h, b) =>
-            {
-                var userId = s?.Player?.UserId ?? (ushort)0;
-                var wasInParty = userId != 0
-                    && _partyManager.GetPartyByUser(userId) != null;
-                await _partyHandler.Handle_LEAVE_PARTY(s, h, b);
-                if (wasInParty && _partyManager.GetPartyByUser(userId) == null)
-                    await _raidHandler.HandleNormalPartyLeftAsync(userId);
-            };                                                      // 13 leave party
+            d[0x000D] = _partyHandler.Handle_LEAVE_PARTY;          // 13 leave party
             d[0x000E] = _partyHandler.Handle_WALKOUT_PARTY_MEMBER;  // 14 踢人
             d[0x000A] = _partyHandler.Handle_REQUEST_PEER;          // 10 右键同屏玩家→组队/交易邀请(按uid)→给目标发 SC 0x0007 弹框
             d[0x000B] = _partyHandler.Handle_RES_PEER;              // 11 被邀请者应答: type0 7B接受/9B拒绝；仅接受才组队
@@ -373,6 +376,12 @@ namespace DfoServer.Network
 
         private void RegisterRaidHandlers(GameCommandRegistry.GameCommandRegistrationGroup d)
         {
+            d[(ushort)CmdPacketTypeA21.RAID_REQUEST_RAID_MEMBERS] = _raidHandler.HandleRaidRequestMembers;
+            d[(ushort)CmdPacketTypeA21.RAID_CHECK_RAID_USER] = _raidHandler.HandleRaidJoinRequest;
+            d[(ushort)CmdPacketTypeA21.RAID_OTHER_CHANNEL_LIST] = _raidHandler.HandleRaidOtherChannelList;
+            d[(ushort)CmdPacketTypeA21.RAID_RECENT_FRIEND_LIST] = _raidHandler.HandleRaidWaitingListRequest;
+            d[(ushort)CmdPacketTypeA21.SET_RAID_WAITING] = _raidHandler.HandleSetRaidWaiting;
+            d[(ushort)CmdPacketTypeA21.REJOIN_RAID] = _raidHandler.HandleRejoinRaid;
             d[(ushort)CmdPacketType.CREATE_RAID] = _raidHandler.HandleCreateRaid;
             d[(ushort)CmdPacketType.RAID_ENTRY_COST_INFO] = _raidHandler.HandleEntryCostInfo;
             d[(ushort)CmdPacketType.RAID_BUFF_SYSTEM] = _raidHandler.HandleRaidBuffSystem;
@@ -439,7 +448,14 @@ namespace DfoServer.Network
                     return;
                 await _inventoryHandler.Handle_ENUM_CMDPACKET_SORT_ITEM(s, h, b);
             };                                                                    //20
-            d[0x0015] = _inventoryHandler.Handle_ENUM_CMDPACKET_BUY_ITEM;          //21
+            d[(ushort)CmdPacketTypeA21.BUY_ITEM] = async (s, h, b) =>
+            {
+                var player = s.Player;
+                var characterId = player?.CharacterId;
+                await _inventoryHandler.Handle_ENUM_CMDPACKET_BUY_ITEM(s, h, b);
+                if (player == s.Player && player?.CharacterId == characterId)
+                    await _raidHandler.RefreshEntryCostsAsync(s);
+            };
             d[0x02CC] = _inventoryHandler.Handle_ENUM_CMDPACKET_SHOP_PURCHASE_COUNT;//716
             d[0x0016] = _inventoryHandler.Handle_ENUM_CMDPACKET_SELL_ITEM;         //22
             d[0x0017] = _inventoryHandler.Handle_ENUM_CMDPACKET_REPAIR_EQUIPMENT;  //23 装备修理

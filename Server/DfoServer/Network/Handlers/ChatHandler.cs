@@ -1,8 +1,10 @@
 using DfoServer.Game.Party;
+using DfoServer.Game.Raid;
 using DfoServer.Game.Session;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace DfoServer.Network.Handlers
@@ -20,6 +22,7 @@ namespace DfoServer.Network.Handlers
 
         private readonly ISessionDirectory _sessions;
         private readonly PartyManager _parties;
+        private readonly RaidManager _raids;
         private readonly object _conversationLock = new object();
         private readonly Dictionary<ulong, uint> _activeConversations =
             new Dictionary<ulong, uint>();
@@ -27,12 +30,14 @@ namespace DfoServer.Network.Handlers
 
         public ChatHandler(
             ISessionDirectory sessions,
-            PartyManager parties)
+            PartyManager parties,
+            RaidManager raids = null)
         {
             _sessions = sessions
                 ?? throw new ArgumentNullException(nameof(sessions));
             _parties = parties
                 ?? throw new ArgumentNullException(nameof(parties));
+            _raids = raids;
             _sessions.SessionEnding += OnSessionEndingAsync;
         }
 
@@ -62,6 +67,11 @@ namespace DfoServer.Network.Handlers
             var sendTasks = new List<Task>(recipients.Count);
             foreach (var recipient in recipients)
             {
+                if (IsRaidMessageMode(request.Mode))
+                {
+                    sendTasks.Add(SendRaidMessageAsync(session, recipient, request));
+                    continue;
+                }
                 if (request.Mode == OneToOneConversationMode
                     && recipient.SessionId == session.SessionId)
                 {
@@ -108,6 +118,14 @@ namespace DfoServer.Network.Handlers
             EnhancedClientSession sender,
             ChatMessageRequest request)
         {
+            if (IsRaidMessageMode(request.Mode))
+            {
+                if (!IsOnline(sender) || _raids == null
+                    || !_raids.TryGetByUser(sender.Player.UserId, out var raid)
+                    || !CanSendRaidMessage(request.Mode, sender.Player.UserId, raid.LeaderUserId))
+                    return Array.Empty<EnhancedClientSession>();
+                return ResolveRaidRecipients(sender, raid);
+            }
             var result = new Dictionary<Guid, EnhancedClientSession>();
             AddIfCurrentChannel(result, sender, sender);
 
@@ -165,6 +183,66 @@ namespace DfoServer.Network.Handlers
             // are backed by guild/megaphone services and must not become a
             // free cross-channel broadcast merely because their wire shape is
             // shared with ordinary chat.
+            return result.Values.ToList();
+        }
+
+        internal static bool IsRaidMessageMode(byte mode) => mode == 52 || mode == 53;
+
+        internal static bool CanSendRaidMessage(byte mode, ushort senderId, ushort leaderId)
+            => senderId != 0 && (mode == 52 || (mode == 53 && senderId == leaderId));
+
+        private async Task SendRaidMessageAsync(
+            EnhancedClientSession sender,
+            EnhancedClientSession recipient,
+            ChatMessageRequest request)
+        {
+            var packet = GamePacketEnvelopeBuilder.Build(0,
+                (ushort)NotiPacketTypeA21.MESSAGE,
+                BuildNotificationBody(request.Mode, sender.Player.UserId, 0, request.MessageBytes));
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            try
+            {
+                if (sender.SessionId != recipient.SessionId)
+                {
+                    var context = RaidHandler.BuildRaidFormationUserContextPacket(sender);
+                    if (context == null
+                        || !await recipient.TrySendPacketAsync(context, timeout.Token, CanSend))
+                    {
+                        FileLogger.Log($"[RaidChat] context failed from={sender.Player.CharacterId} to={recipient.Player.CharacterId}");
+                        return;
+                    }
+                }
+                var sent = await recipient.TrySendPacketAsync(packet, timeout.Token, CanSend);
+                FileLogger.Log($"[RaidChat] from={sender.Player.CharacterId} to={recipient.Player.CharacterId} sent={sent}");
+            }
+            catch (Exception ex)
+            {
+                FileLogger.Log($"[RaidChat] failed from={sender.Player.CharacterId} to={recipient.Player.CharacterId} error={ex.GetType().Name}");
+            }
+            bool CanSend() => ResolveRecipients(sender, request)
+                .Any(current => current.SessionId == recipient.SessionId);
+        }
+
+        internal IReadOnlyList<EnhancedClientSession> ResolveRaidRecipients(
+            EnhancedClientSession sender, RaidSnapshot raid)
+        {
+            var result = new Dictionary<Guid, EnhancedClientSession>();
+            if (!IsOnline(sender) || raid == null
+                || !_sessions.TryGet(sender.Player.CharacterId, out var current)
+                || current.SessionId != sender.SessionId
+                || !raid.Members.Any(m => m.UserId == sender.Player.UserId
+                    && m.CharacterId == (uint)sender.Player.CharacterId && m.SessionId == sender.SessionId))
+                return result.Values.ToList();
+            foreach (var member in raid.Members)
+            {
+                if (member.CharacterId <= int.MaxValue
+                    && _sessions.TryGet((int)member.CharacterId, out var memberSession)
+                    && memberSession?.Player != null
+                    && memberSession.SessionId == member.SessionId
+                    && memberSession.Player.UserId == member.UserId
+                    && memberSession.Player.CharacterId == (int)member.CharacterId)
+                    AddIfCurrentChannel(result, sender, memberSession);
+            }
             return result.Values.ToList();
         }
 
