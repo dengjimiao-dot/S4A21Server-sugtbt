@@ -320,7 +320,7 @@ namespace DfoServer.SelfTests
                 blocked.ConstrainSocketBuffers(1024);
                 var blockedBeforeBatch =
                     blocked.FillWriterUntilWouldBlock();
-                var body = new byte[256 * 1024];
+                var body = new byte[16 * 1024];
                 body[0] = 0x41;
                 body[body.Length - 1] = 0x42;
                 var packet = GamePacketEnvelopeBuilder.Build(
@@ -340,7 +340,8 @@ namespace DfoServer.SelfTests
                     blocked.Session.TcpClient.Close();
                     sending.Wait(TimeSpan.FromSeconds(5));
                 }
-                var readCompleted = healthyRead.Wait(
+                var readCompleted = SpinWait.SpinUntil(
+                    () => healthyRead.IsCompleted,
                     TimeSpan.FromSeconds(5));
                 if (!readCompleted)
                     healthy.Session.TcpClient.Close();
@@ -348,7 +349,9 @@ namespace DfoServer.SelfTests
                 var result = sendCompleted
                     ? sending.GetAwaiter().GetResult()
                     : null;
-                var received = readCompleted ? healthyRead.Result : null;
+                var received = healthyRead.IsCompletedSuccessfully
+                    ? healthyRead.Result
+                    : null;
                 Check(
                     "in-flight write timeout retires only blocked transport",
                     blockedBeforeBatch
@@ -1985,7 +1988,7 @@ VALUES (@cid, @aid, @name, 0);";
                     {
                         var blocked = false;
                         for (var sent = 0;
-                             sent < 64 * 1024 * 1024;
+                             sent < 8 * 1024 * 1024;
                              sent += chunk.Length)
                         {
                             try

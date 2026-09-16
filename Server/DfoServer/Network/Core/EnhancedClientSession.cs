@@ -152,9 +152,6 @@ namespace DfoServer.Network
 
                 try
                 {
-                    foreach (var packet in logicalPackets)
-                        PacketFileLogger.Log("SEND", packet);
-
                     // This batch has one send-lock linearization point and one
                     // transport write. Unlike the ordinary small-frame path,
                     // its bounded best-effort contract also covers an in-flight
@@ -165,6 +162,9 @@ namespace DfoServer.Network
                         0,
                         wireBatch.Length,
                         cancellationToken);
+                    PacketFileLogger.LogBatchBestEffort(
+                        "SEND",
+                        logicalPackets);
                     return true;
                 }
                 catch (OperationCanceledException)
