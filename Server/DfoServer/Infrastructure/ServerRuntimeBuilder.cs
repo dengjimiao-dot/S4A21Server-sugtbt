@@ -621,10 +621,13 @@ namespace DfoServer.Infrastructure
                 core.CharacterRepository,
                 world.Sessions,
                 world.RaidManager);
+            party.AttachRaidHandler(raid);
+            raid.RaidPeerRequestAsync = party.RequestRaidPeerAsync;
             var chat = new ChatHandler(
                 world.Sessions,
                 world.PartyManager,
-                world.CharacterTransitions);
+                world.CharacterTransitions,
+                world.RaidManager);
             chat.ConfigureBlacklist(new Game.Friends.BlacklistRepository(core.Database));
             townDungeon.Town.ConfigureDungeonGiveupPartyDeparture(
                 party.HandleDungeonGiveupWithinTransitionAsync);

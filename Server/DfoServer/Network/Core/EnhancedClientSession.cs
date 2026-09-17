@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -52,6 +53,18 @@ namespace DfoServer.Network
 
         private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
 
+        private volatile bool _supportsRaidMemberColumnV1;
+
+        internal bool SupportsRaidMemberColumnV1 => _supportsRaidMemberColumnV1;
+
+        internal bool TrySetRaidMemberColumnProtocolVersion(uint version)
+        {
+            if (version != 1)
+                return false;
+            _supportsRaidMemberColumnV1 = true;
+            return true;
+        }
+
         public EnhancedClientSession(
             TcpClient client,
             IPacketHeader packetStructure,
@@ -81,6 +94,37 @@ namespace DfoServer.Network
             finally
             {
                 _sendLock.Release();
+            }
+        }
+
+        internal Task SendPreparedPacketBatchAsync(Func<IReadOnlyList<byte[]>> prepare)
+        {
+            return SendPreparedPacketBatchCoreAsync(_sendLock, prepare, packet =>
+            {
+                PacketFileLogger.Log("SEND", packet);
+                return Stream.WriteAsync(packet, 0, packet.Length);
+            });
+        }
+
+        internal static async Task SendPreparedPacketBatchCoreAsync(
+            SemaphoreSlim sendLock,
+            Func<IReadOnlyList<byte[]>> prepare,
+            Func<byte[], Task> writePacket)
+        {
+            ArgumentNullException.ThrowIfNull(sendLock);
+            ArgumentNullException.ThrowIfNull(prepare);
+            ArgumentNullException.ThrowIfNull(writePacket);
+            await sendLock.WaitAsync();
+            try
+            {
+                var packets = prepare()
+                    ?? throw new InvalidOperationException("Packet batch preparation returned null");
+                foreach (var packet in packets)
+                    await writePacket(packet);
+            }
+            finally
+            {
+                sendLock.Release();
             }
         }
 
