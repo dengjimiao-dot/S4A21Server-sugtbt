@@ -28,6 +28,10 @@ namespace DfoServer.Network.Handlers
         private readonly CharacterTransitionCoordinator _transitions;
         private Game.Guilds.GuildRepository _guilds;
         private CharacterTransitionCoordinator _guildTransitions;
+        private Game.Friends.BlacklistRepository _blacklist;
+
+        internal void ConfigureBlacklist(Game.Friends.BlacklistRepository blacklist) => _blacklist = blacklist;
+        private bool IsBlocked(int recipient, int sender) => _blacklist?.IsBlocked(recipient, sender) == true;
 
         internal void ConfigureGuilds(Game.Guilds.GuildRepository guilds, CharacterTransitionCoordinator transitions)
         { _guilds = guilds; _guildTransitions = transitions; }
@@ -81,6 +85,8 @@ namespace DfoServer.Network.Handlers
             var sendTasks = new List<Task>(recipients.Count);
             foreach (var recipient in recipients)
             {
+                int senderId = session.Player.CharacterId;
+                int recipientId = recipient.Player.CharacterId;
                 var packet = GamePacketEnvelopeBuilder.Build(
                     0x00,
                     (ushort)NotiPacketTypeA21.MESSAGE,
@@ -89,7 +95,10 @@ namespace DfoServer.Network.Handlers
                         session.Player.UserId,
                         serverGroup: 0,
                         request.MessageBytes));
-                sendTasks.Add(recipient.SendPacketAsync(packet));
+                sendTasks.Add(recipient.TrySendPacketAsync(packet, default, () =>
+                    session.Player.CharacterId == senderId && recipient.Player.CharacterId == recipientId
+                    && _transitions.IsCurrent(session) && _transitions.IsCurrent(recipient)
+                    && !IsBlocked(recipientId, senderId)));
             }
 
             if (sendTasks.Count > 0)
@@ -173,14 +182,17 @@ namespace DfoServer.Network.Handlers
                 if (!_sessions.TryGet(id, out var recipient)) continue;
                 async Task SendCurrent()
                 {
+                    if (sender.Player.CharacterId != actor || recipient.Player.CharacterId != id
+                        || IsBlocked(id, actor)) return;
                     if (!Game.Inventory.InventoryContext.TryGetOwnedLease(sender.SessionId, actor, out _)
                         || !Game.Inventory.InventoryContext.TryGetOwnedLease(recipient.SessionId, id, out _)
                         || _guilds.GetForMember(actor)?.Id != guild.Id || _guilds.GetForMember(id)?.Id != guild.Id) return;
                     // 01173D70 reads mode, status, sender DSTR, server byte, message DSTR.
                     // Use the name-bearing form on every channel; UIDs are channel-local.
-                    await recipient.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0,
+                    await recipient.TrySendPacketAsync(GamePacketEnvelopeBuilder.Build(0,
                         (ushort)NotiPacketTypeA21.MESSAGE_OTHER_CHANNEL,
-                        BuildGuildNotificationBody(sender.Player.Name, request.MessageBytes)));
+                        BuildGuildNotificationBody(sender.Player.Name, request.MessageBytes)), default,
+                        () => !IsBlocked(id, actor));
                 }
                 if (id == actor) await _guildTransitions.RunIfCurrentAsync(sender, SendCurrent);
                 else await _guildTransitions.RunIfBothCurrentAsync(sender, recipient, SendCurrent);
@@ -257,6 +269,13 @@ namespace DfoServer.Network.Handlers
             await _transitions.RunIfBothCurrentAsync(session, target, async () =>
             {
                 if (!actor.IsCurrent(_sessions) || !peer.IsCurrent(_sessions)) return;
+                if (IsBlocked(peer.CharacterId, actor.CharacterId) || IsBlocked(actor.CharacterId, peer.CharacterId))
+                {
+                    await session.TrySendPacketAsync(GamePacketEnvelopeBuilder.Build(0,
+                        (ushort)NotiPacketTypeA21.CREATE_GROUP, new byte[] { 77 }), default,
+                        () => actor.IsCurrent(_sessions));
+                    return;
+                }
                 var key = MakeConversationKey(actor.CharacterId, peer.CharacterId);
                 Conversation conversation;
                 lock (_conversationLock)

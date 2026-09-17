@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Runtime.CompilerServices;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
@@ -31,6 +32,19 @@ namespace DfoServer.Game.Friends
             new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         private static bool _loaded;
         private static UnitedFriendRepository _repository;
+        private static readonly ConditionalWeakTable<ISessionDirectory, BlacklistProjection> Blacklists = new();
+
+        internal static void ConfigureBlacklist(ISessionDirectory sessions, BlacklistProjection projection)
+        {
+            Blacklists.Remove(sessions);
+            Blacklists.Add(sessions, projection);
+        }
+
+        private static BlacklistProjection GetBlacklist(ISessionDirectory sessions)
+            => sessions != null && Blacklists.TryGetValue(sessions, out var projection) ? projection : null;
+
+        private static bool IsBlacklisted(EnhancedClientSession owner, EnhancedClientSession target, ISessionDirectory sessions)
+            => GetBlacklist(sessions)?.IsBlocked(owner.Player.CharacterId, target.Player.CharacterId) == true;
 
         private static UnitedFriendRepository Repository
         {
@@ -188,6 +202,10 @@ namespace DfoServer.Game.Friends
 
             try
             {
+                if (GetBlacklist(dir) is { } blacklist)
+                {
+                    await blacklist.PublishAsync(self);
+                }
                 var online = GetOnlineSessions(dir, self);
 
                 // 单向推送：谁的面板显示 self（IsFriend(otherName, selfName)）谁收到 self 通知。
@@ -204,10 +222,12 @@ namespace DfoServer.Game.Friends
                     // s 的面板显示 self：先通知进入频道，同频道再推 USERINFO 实体。
                     if (sSeesSelf)
                     {
+                        bool blacklisted = IsBlacklisted(s, self, dir);
                         var selfEnterBody = BuildChatNoticeBody(
-                            ResolveChannel(self), selfName);
-                        await s.SendPacketAsync(
-                            GamePacketEnvelopeBuilder.Build(0x00, (ushort)NotiPacketTypeA21.INOUT_UNITED_SERVER_FRIEND, selfEnterBody));
+                            ResolveChannel(self), selfName, blacklisted);
+                        if (!await s.TrySendPacketAsync(
+                            GamePacketEnvelopeBuilder.Build(0x00, (ushort)NotiPacketTypeA21.INOUT_UNITED_SERVER_FRIEND, selfEnterBody),
+                            default, CaptureFriendNoticeCheck(s, self, dir, false, blacklisted))) continue;
                         FileLogger.Log(
                             $"[UnitedFriend] {otherName} → 推 0x0112 进入频道 "
                             + $"{selfName} ch={ResolveChannel(self)} "
@@ -283,9 +303,11 @@ namespace DfoServer.Game.Friends
                         continue;
 
                     // channel=0 表示退出频道；先发上下线通知，再发 USER_LEAVE。
-                    var leaveBody = BuildChatNoticeBody(0, selfName);
-                    await s.SendPacketAsync(
-                        GamePacketEnvelopeBuilder.Build(0x00, (ushort)NotiPacketTypeA21.INOUT_UNITED_SERVER_FRIEND, leaveBody));
+                    bool blacklisted = IsBlacklisted(s, self, dir);
+                    var leaveBody = BuildChatNoticeBody(0, selfName, blacklisted);
+                    if (!await s.TrySendPacketAsync(
+                        GamePacketEnvelopeBuilder.Build(0x00, (ushort)NotiPacketTypeA21.INOUT_UNITED_SERVER_FRIEND, leaveBody),
+                        default, CaptureFriendNoticeCheck(s, self, dir, true, blacklisted))) continue;
                     FileLogger.Log(
                         $"[UnitedFriend] {selfName} 下线 → 推 0x0112 退出频道 "
                         + $"给 {otherName} body({leaveBody.Length}B): "
@@ -646,7 +668,7 @@ namespace DfoServer.Game.Friends
         }
 
         // Capture before waiting for the send lock: a reused socket is not a reused character identity.
-        private static Func<bool> CaptureSessionIdentityCheck(EnhancedClientSession session, ISessionDirectory dir)
+        internal static Func<bool> CaptureSessionIdentityCheck(EnhancedClientSession session, ISessionDirectory dir)
         {
             var characterId = session.Player.CharacterId;
             var userId = session.Player.UserId;
@@ -655,6 +677,20 @@ namespace DfoServer.Game.Friends
                 && session.Player.CharacterId == characterId && session.Player.UserId == userId
                 && GetPlayerName(session) == name
                 && (dir == null || (dir.TryGet(characterId, out var current) && ReferenceEquals(current, session)));
+        }
+
+        private static Func<bool> CaptureFriendNoticeCheck(EnhancedClientSession owner, EnhancedClientSession target,
+            ISessionDirectory dir, bool leaving, bool blacklisted)
+        {
+            var ownerCurrent = CaptureSessionIdentityCheck(owner, dir);
+            var targetCurrent = CaptureSessionIdentityCheck(target, dir);
+            int id = target.Player.CharacterId;
+            ushort uid = target.Player.UserId;
+            string name = GetPlayerName(target), ownerName = GetPlayerName(owner);
+            return () => ownerCurrent() && target.Player.CharacterId == id && target.Player.UserId == uid
+                && GetPlayerName(target) == name && IsFriend(ownerName, name)
+                && (leaving ? !dir.TryGet(id, out var registered) || ReferenceEquals(registered, target) : targetCurrent())
+                && IsBlacklisted(owner, target, dir) == blacklisted;
         }
 
         /// <summary>
@@ -683,6 +719,9 @@ namespace DfoServer.Game.Friends
                 GamePacketEnvelopeBuilder.Build(0x00, (ushort)NotiPacketTypeA21.UNITED_SERVER_FRIEND_INFO, body),
                 cancellationToken, () => isSelfCurrent()
                     && GetFriends(selfName).SequenceEqual(friends, StringComparer.Ordinal));
+            // The native reset keeps temporary entries only; restore permanent entries afterwards.
+            if (sent && isSelfCurrent() && GetBlacklist(dir) is { } blacklist)
+                await blacklist.PublishAsync(self);
             FileLogger.Log(
                 $"[UnitedFriend] {GetPlayerName(self)} 好友列表 subcmd=0 "
                 + $"count={friends.Count} sent={sent} "
@@ -857,11 +896,11 @@ namespace DfoServer.Game.Friends
         /// <summary>
         /// 构造上下线聊天通知 body（字段布局见设计文档 §4.2）：
         /// channel≠0 → "X 进入频道"；channel==0 → "X 退出频道"。
-        /// oF 恒 0x00 → 不进黑名单（黑名单不在普通好友增删范围内）。
+        /// 黑名单位取接收者当前永久关系，避免上下线通知清除客户端标记。
         /// </summary>
         private static byte[] BuildChatNoticeBody(
             ushort channel,
-            string name)
+            string name, bool blacklisted = false)
         {
             var w = new GamePacketWriter();
             w.WriteUInt16(channel);              // 频道：0=退出频道, 真实频道=进入频道
@@ -869,7 +908,7 @@ namespace DfoServer.Game.Friends
             var nameBytes = ClientTextEncoding.GetBytes(name);
             w.WriteUInt32((uint)nameBytes.Length);
             w.WriteBytes(nameBytes);             // name
-            w.WriteByte(0);                      // oF=0x00 → 不进黑名单
+            w.WriteByte(blacklisted ? (byte)1 : (byte)0);
             return w.ToArray();
         }
 

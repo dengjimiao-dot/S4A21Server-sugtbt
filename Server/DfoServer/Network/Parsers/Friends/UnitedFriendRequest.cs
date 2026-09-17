@@ -23,6 +23,10 @@ namespace DfoServer.Network.Parsers.Friends
                 && TryName(body.AsSpan(1), out name);
         }
 
+        // REQUEST_USER_CHANNEL shares the server/DSTR layout; its ACK DSTR reader requires < 50 GBK bytes.
+        internal static bool TryUserChannel(byte[] body, out string name)
+            => TryDelete(body, out name) && body.Length < 55;
+
         private static bool TryName(ReadOnlySpan<byte> body, out string name)
         {
             name = null;
