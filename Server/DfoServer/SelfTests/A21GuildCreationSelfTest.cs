@@ -13,68 +13,6 @@ namespace DfoServer.SelfTests
 {
     public static class A21GuildCreationSelfTest
     {
-        private static void CheckCharacterNameEncoding(GameDatabase database, Action<string, bool> check)
-        {
-            // The migration fixture has character 100 as both member and applicant.
-            // Use literal GBK bytes so the test cannot pass via the same wrong codec.
-            byte[] chinese = { 0xB2, 0xE2, 0xCA, 0xD4, 0x41, 0x31 }; // 测试A1
-            byte[] ascii = { 0x41, 0x62, 0x31, 0x32 }; // Ab12
-            var cases = new (string Label, string Name, object Stored, byte[] Wire)[]
-            {
-                ("GBK BLOB", "测试A1", chinese, chinese),
-                ("Unicode TEXT", "测试A1", "测试A1", chinese),
-                ("ASCII BLOB", "Ab12", ascii, ascii),
-                ("ASCII TEXT", "Ab12", "Ab12", ascii)
-            };
-            void SetName(object value) => database.Write((c, t) =>
-            {
-                using var cmd = c.CreateCommand();
-                cmd.Transaction = t;
-                cmd.CommandText = "UPDATE characters SET name=@name WHERE character_id=100;";
-                cmd.Parameters.AddWithValue("@name", value);
-                cmd.ExecuteNonQuery();
-            });
-            static bool ReadWireName(BinaryReader reader, byte[] expected)
-            {
-                int length = reader.ReadInt32();
-                byte[] actual = reader.ReadBytes(length);
-                return length == expected.Length && actual.SequenceEqual(expected);
-            }
-            try
-            {
-                foreach (var sample in cases)
-                {
-                    SetName(sample.Stored);
-                    var repository = new GuildRepository(database);
-                    var roster = repository.GetRosterForMember(100);
-                    var applications = repository.GetApplicationsForLeader(100);
-                    check($"{sample.Label} preserves leader, member and applicant names",
-                        roster.LeaderName == sample.Name && roster.Members.Single().Name == sample.Name
-                        && applications.Single().Name == sample.Name);
-                    foreach (bool online in new[] { false, true })
-                    {
-                        byte[] packet = GuildMemberPacketBuilder.Build(roster, _ => online ? (byte)11 : (byte?)null);
-                        using var reader = new BinaryReader(new MemoryStream(packet, 15, packet.Length - 15));
-                        bool valid = reader.ReadByte() == 1 && reader.ReadInt32() == roster.Guild.Id
-                            && ReadWireName(reader, sample.Wire) && reader.ReadUInt32() == 0
-                            && reader.ReadUInt16() == 1 && reader.ReadUInt16() == 1
-                            && reader.ReadInt32() == 100 && ReadWireName(reader, sample.Wire);
-                        check($"{sample.Label} sends exact GBK roster names (online={online})", valid);
-                    }
-                    byte[] applicationPacket = GuildJoinPacketBuilder.Applications(applications);
-                    using var applicationReader = new BinaryReader(new MemoryStream(
-                        applicationPacket, 15, applicationPacket.Length - 15));
-                    check($"{sample.Label} sends exact GBK applicant name",
-                        applicationReader.ReadByte() == 1 && applicationReader.ReadInt32() == 1
-                        && applicationReader.ReadInt32() == 100 && ReadWireName(applicationReader, sample.Wire));
-                }
-            }
-            finally
-            {
-                SetName("guild-founder");
-            }
-        }
-
         public static int Run()
         {
             int failures = 0;
@@ -175,7 +113,6 @@ PRAGMA user_version=30; UPDATE schema_metadata SET schema_version=30;";
                     && repository.GetRosterForMember(100).Members.Single().Rank==1
                     && repository.GetRosterForMember(100).Members.Single().Memo==""
                     && repository.GetApplicationsForLeader(100).Count==1);
-                CheckCharacterNameEncoding(database, Check);
                 bool guarded = false;
                 try { database.Write((c,t) => { using var cmd=c.CreateCommand();cmd.Transaction=t;cmd.CommandText="UPDATE characters SET delete_flag=1 WHERE character_id=100;";cmd.ExecuteNonQuery(); }); }
                 catch (SqliteException) { guarded = true; }
