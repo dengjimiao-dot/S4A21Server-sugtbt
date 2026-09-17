@@ -561,7 +561,8 @@ namespace DfoServer.Infrastructure
                     raidManager: world.RaidManager,
                     database: core.Database,
                     dailyResetService: core.DailyResetService,
-                    antonAwakeningProgress: core.AntonAwakeningProgress));
+                    antonAwakeningProgress: core.AntonAwakeningProgress,
+                    overflowRewardSink: inventory.OverflowRewardSink));
         }
 
         internal GameProtocolSocialHandlers GetOrCreateGameProtocolSocialHandlers(

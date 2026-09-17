@@ -2,6 +2,12 @@ using System;
 
 namespace DfoServer.Game.Dungeon
 {
+    internal enum DungeonAdmissionRejectProjection : byte
+    {
+        Native = 0,
+        Silent = 1,
+    }
+
     internal enum DungeonAdmissionRejectReason : byte
     {
         Unknown = 0,

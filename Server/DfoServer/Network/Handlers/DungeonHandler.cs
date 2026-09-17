@@ -84,7 +84,8 @@ namespace DfoServer.Network.Handlers
             IGameDatabase database = null,
             Game.DailyReset.DailyResetService dailyResetService = null,
             Game.Dungeon.AntonAwakeningDailyProgressService
-                antonAwakeningProgress = null)
+                antonAwakeningProgress = null,
+            IInventoryOverflowRewardSink overflowRewardSink = null)
         {
             _services = new DungeonSharedServices(
                 reviveCoinService,
@@ -106,7 +107,8 @@ namespace DfoServer.Network.Handlers
                 raidManager,
                 database,
                 dailyResetService,
-                antonAwakeningProgress);
+                antonAwakeningProgress,
+                overflowRewardSink);
             _map = new DungeonMapHandler(_services);
             _entry = new DungeonEntryHandler(_services, _map);
             _settlement = new DungeonSettlementHandler(_services, _entry);

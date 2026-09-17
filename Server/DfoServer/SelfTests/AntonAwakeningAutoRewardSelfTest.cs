@@ -8,6 +8,7 @@ using System.Threading;
 using DfoServer.Game.DailyReset;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Mailbox;
 using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
 using DfoServer.Network;
@@ -46,6 +47,7 @@ namespace DfoServer.SelfTests
             VerifyProjectionJournalRecovery(ref failures);
             VerifyTimerGrantAfterProjection(ref failures);
             VerifyEndingRunDoesNotRearmGrantTimer(ref failures);
+            VerifyNormalCardMailboxOverflow(ref failures);
             VerifyTransactionalGrant(ref failures);
             VerifyNonRewardableDungeonDoesNotPrepare(ref failures);
             Console.WriteLine(
@@ -2865,7 +2867,11 @@ namespace DfoServer.SelfTests
                     new DailyResetService(database),
                     _ => null,
                     _ => 0);
-                var grants = new AntonAwakeningRewardGrantService(daily);
+                var mailbox = new MailboxService(
+                    new MailboxRepository(database));
+                var grants = new AntonAwakeningRewardGrantService(
+                    daily,
+                    new MailboxInventoryOverflowRewardSink(mailbox));
 
                 var failed = grants.TryGrant(
                     lease,
@@ -2930,6 +2936,251 @@ namespace DfoServer.SelfTests
                         == AntonAwakeningRewardGrantOutcome.Granted
                     && daily.HasClaimedRewardToday(characterId, 99, 248)
                     && CountMainItem(lease, 3309) == countAfterGrant + 2,
+                    ref failures);
+
+                lock (lease.SyncRoot)
+                    FillMainInventory(lease.Inventory);
+                var overflowReward = new AntonAwakeningRewardDefinition(
+                    100,
+                    247,
+                    7003,
+                    100320752,
+                    1,
+                    2);
+                var overflowGranted = grants.TryGrant(
+                    lease,
+                    overflowReward);
+                var overflowInbox = mailbox.LoadInbox(characterId, 20);
+                var overflowDuplicate = grants.TryGrant(
+                    lease,
+                    overflowReward);
+                var inboxAfterDuplicate = mailbox.LoadInbox(characterId, 20);
+                Check(
+                    "full inventory Anton reward commits daily claim and mail",
+                    overflowGranted.Outcome
+                        == AntonAwakeningRewardGrantOutcome.Granted
+                    && overflowGranted.DeliveredToMailbox
+                    && !overflowGranted.Changes.HasChanges
+                    && daily.HasClaimedRewardToday(characterId, 100, 247)
+                    && CountMainItem(lease, 100320752) == 0
+                    && overflowInbox.Count == 1
+                    && overflowInbox[0].Attachments.Count == 1
+                    && overflowInbox[0].Attachments[0].ItemTemplateId
+                        == 100320752
+                    && overflowInbox[0].Attachments[0].ItemCount == 1
+                    && overflowInbox[0].Attachments[0].ItemCoreData.Length
+                        == ItemCore.Size,
+                    ref failures);
+                Check(
+                    "duplicate Anton reward does not send duplicate mail",
+                    overflowDuplicate.Outcome
+                        == AntonAwakeningRewardGrantOutcome.AlreadyClaimed
+                    && inboxAfterDuplicate.Count == 1,
+                    ref failures);
+
+                var rejectingGrants =
+                    new AntonAwakeningRewardGrantService(daily);
+                var rejectedReward = new AntonAwakeningRewardDefinition(
+                    101,
+                    247,
+                    7004,
+                    100320752,
+                    1,
+                    2);
+                var rejected = rejectingGrants.TryGrant(
+                    lease,
+                    rejectedReward);
+                Check(
+                    "Anton mail failure rolls back its daily claim",
+                    rejected.Outcome
+                        == AntonAwakeningRewardGrantOutcome.Failed
+                    && !daily.HasClaimedRewardToday(characterId, 101, 247)
+                    && mailbox.LoadInbox(characterId, 20).Count == 1,
+                    ref failures);
+            }
+            finally
+            {
+                InventoryContext.Unregister(sessionId, characterId);
+                TryDelete(path);
+                TryDelete(path + "-wal");
+                TryDelete(path + "-shm");
+            }
+        }
+
+        private static void VerifyNormalCardMailboxOverflow(ref int failures)
+        {
+            var path = Path.Combine(
+                Path.GetTempPath(),
+                $"dfo_card_mail_overflow_{Guid.NewGuid():N}.db");
+            var sessionId = Guid.NewGuid();
+            const int accountId = 62110;
+            const int characterId = 62111;
+            try
+            {
+                var database = new GameDatabase(path, ServerPaths.SchemaFilePath);
+                Seed(database, accountId, characterId);
+                InventoryService inventory;
+                using (var connection = database.OpenConnection())
+                {
+                    inventory = InventoryService.LoadFromDb(
+                        connection,
+                        characterId,
+                        accountId,
+                        database);
+                }
+                var lease = InventoryContext.Register(
+                    sessionId,
+                    characterId,
+                    inventory);
+                lock (lease.SyncRoot)
+                {
+                    lease.Inventory.SetMainVirtualCount(
+                        InventoryService.MainVirtualCurrencySlotStart,
+                        1000);
+                    FillMainInventory(lease.Inventory);
+                }
+
+                var mailbox = new MailboxService(
+                    new MailboxRepository(database));
+                var overflow = new MailboxInventoryOverflowRewardSink(mailbox);
+                var effects = new DungeonPersistentEffectApplicationService(
+                    database.ConnectionString,
+                    database: database,
+                    overflowRewardSink: overflow);
+                var freeEffect = new DungeonEffectId(
+                    Guid.NewGuid(),
+                    DungeonPersistentEffectKinds.CardRewardFreeCommit,
+                    DungeonEffectScope.Player,
+                    characterId);
+                var freeCards = new List<ClearRewardGenerator.CardReward>
+                {
+                    new ClearRewardGenerator.CardReward
+                    {
+                        IsGold = true,
+                        GoldAmount = 50,
+                    },
+                    new ClearRewardGenerator.CardReward
+                    {
+                        ItemId = 3309,
+                        StackCount = 3,
+                    },
+                };
+                var freeCommitted = effects.TryApplyCardReward(
+                    freeEffect,
+                    lease,
+                    sessionId,
+                    CardRewardSide.Free,
+                    paidGoldCost: 0,
+                    consumeGoldCardContractUse: false,
+                    freeCards,
+                    out var freeResult,
+                    out _);
+                var inboxAfterFree = mailbox.LoadInbox(characterId, 20);
+                var freeDuplicate = effects.TryApplyCardReward(
+                    freeEffect,
+                    lease,
+                    sessionId,
+                    CardRewardSide.Free,
+                    paidGoldCost: 0,
+                    consumeGoldCardContractUse: false,
+                    freeCards,
+                    out var freeDuplicateResult,
+                    out _);
+                var inboxAfterFreeDuplicate = mailbox.LoadInbox(
+                    characterId,
+                    20);
+
+                var paidEffect = new DungeonEffectId(
+                    Guid.NewGuid(),
+                    DungeonPersistentEffectKinds.CardRewardPaidCommit,
+                    DungeonEffectScope.Player,
+                    characterId);
+                var paidCards = Enumerable.Repeat(
+                        default(ClearRewardGenerator.CardReward),
+                        6)
+                    .ToList();
+                paidCards[5] = new ClearRewardGenerator.CardReward
+                {
+                    ItemId = 3309,
+                    StackCount = 2,
+                };
+                var paidCommitted = effects.TryApplyCardReward(
+                    paidEffect,
+                    lease,
+                    sessionId,
+                    CardRewardSide.Paid,
+                    paidGoldCost: 100,
+                    consumeGoldCardContractUse: false,
+                    paidCards,
+                    out var paidResult,
+                    out _);
+                var inboxAfterPaid = mailbox.LoadInbox(characterId, 20);
+
+                var rejectingEffects =
+                    new DungeonPersistentEffectApplicationService(
+                        database.ConnectionString,
+                        database: database);
+                var rejectedEffect = new DungeonEffectId(
+                    Guid.NewGuid(),
+                    DungeonPersistentEffectKinds.CardRewardPaidCommit,
+                    DungeonEffectScope.Player,
+                    characterId);
+                var goldBeforeRejected = CountMainItem(
+                    lease,
+                    InventoryService.MainVirtualCurrencySlotStart);
+                var rejected = rejectingEffects.TryApplyCardReward(
+                    rejectedEffect,
+                    lease,
+                    sessionId,
+                    CardRewardSide.Paid,
+                    paidGoldCost: 40,
+                    consumeGoldCardContractUse: false,
+                    paidCards,
+                    out _,
+                    out _);
+
+                Check(
+                    "full inventory free card commits gold and item mail",
+                    freeCommitted
+                    && freeDuplicate
+                    && freeResult != null
+                    && freeResult.DeliveredToMailbox
+                    && freeDuplicateResult?.DeliveredToMailbox == true
+                    && freeResult.Changes.Any(change =>
+                        change.ListType == InventoryListType.Main
+                        && change.SlotIndex
+                            == InventoryService.MainVirtualCurrencySlotStart)
+                    && CountMainItem(
+                            lease,
+                            InventoryService.MainVirtualCurrencySlotStart)
+                        == 950
+                    && inboxAfterFree.Count == 1
+                    && inboxAfterFree[0].Attachments.Count == 1
+                    && inboxAfterFree[0].Attachments[0].ItemTemplateId == 3309
+                    && inboxAfterFree[0].Attachments[0].ItemCount == 3
+                    && inboxAfterFree[0].Attachments[0].ItemCoreData.Length
+                        == ItemCore.Size
+                    && inboxAfterFreeDuplicate.Count == 1,
+                    ref failures);
+                Check(
+                    "full inventory paid card commits cost and item mail",
+                    paidCommitted
+                    && paidResult != null
+                    && paidResult.DeliveredToMailbox
+                    && inboxAfterPaid.Count == 2
+                    && inboxAfterPaid.Sum(mail => mail.Attachments.Count) == 2
+                    && inboxAfterPaid.Sum(mail =>
+                            mail.Attachments.Sum(value => value.ItemCount))
+                        == 5,
+                    ref failures);
+                Check(
+                    "mail rejection rolls back paid card cost and effect",
+                    !rejected
+                    && CountMainItem(
+                            lease,
+                            InventoryService.MainVirtualCurrencySlotStart)
+                        == goldBeforeRejected
+                    && mailbox.LoadInbox(characterId, 20).Count == 2,
                     ref failures);
             }
             finally
@@ -3245,6 +3496,33 @@ namespace DfoServer.SelfTests
         {
             lock (lease.SyncRoot)
                 return lease.Inventory.CountMainItem(itemId);
+        }
+
+        private static void FillMainInventory(InventoryService inventory)
+        {
+            if (inventory == null)
+                throw new ArgumentNullException(nameof(inventory));
+
+            for (short slot = InventoryService.MainSlotStart;
+                 slot <= InventoryService.MainSlotEnd;
+                 slot++)
+            {
+                if (!inventory.SetItem(
+                        InventoryListType.Main,
+                        slot,
+                        new ItemCore
+                        {
+                            ItemKind = ItemCore.KindEquipment,
+                            ItemId = 200000000 + slot,
+                            InstanceValue = 1,
+                            Marker16 = -1,
+                            RandomOptionChangedIndex = 0xFF,
+                        }))
+                {
+                    throw new InvalidOperationException(
+                        $"failed to fill main inventory slot {slot}");
+                }
+            }
         }
 
         private static void Seed(

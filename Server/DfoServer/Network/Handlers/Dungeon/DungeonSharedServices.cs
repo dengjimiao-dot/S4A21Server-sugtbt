@@ -98,7 +98,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             IGameDatabase database = null,
             Game.DailyReset.DailyResetService dailyResetService = null,
             Game.Dungeon.AntonAwakeningDailyProgressService
-                antonAwakeningProgress = null)
+                antonAwakeningProgress = null,
+            IInventoryOverflowRewardSink overflowRewardSink = null)
         {
             ReviveCoin = reviveCoin
                 ?? throw new ArgumentNullException(nameof(reviveCoin));
@@ -209,7 +210,8 @@ namespace DfoServer.Network.Handlers.Dungeon
             AntonRewards = new AntonAwakeningRewardCoordinator(
                 AntonCardService,
                 new Game.Dungeon.AntonAwakeningRewardGrantService(
-                    AntonCardService),
+                    AntonCardService,
+                    overflowRewardSink),
                 Sessions,
                 InventoryRefresh,
                 new AntonNormalConquestNotificationSender(PartyPackets));

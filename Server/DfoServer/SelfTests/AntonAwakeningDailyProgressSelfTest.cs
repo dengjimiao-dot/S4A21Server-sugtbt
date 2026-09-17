@@ -382,9 +382,34 @@ namespace DfoServer.SelfTests
                     && followerDecision.MissingDungeonIds.SequenceEqual(
                         new[] { 245 }),
                     ref failures);
+                var firstDecision = service.EvaluateAdmission(
+                    incompleteCharacter,
+                    243);
+                var secondDecision = service.EvaluateAdmission(
+                    incompleteCharacter,
+                    244);
+                var thirdDecision = service.EvaluateAdmission(
+                    incompleteCharacter,
+                    245);
+                var fourthDecision = service.EvaluateAdmission(
+                    incompleteCharacter,
+                    246);
                 Check(
-                    "non-247 admission is a no-op without a character lookup",
-                    service.EvaluateAdmission(0, 246).Allowed,
+                    "each sequential target requires only its ordered completed prefix",
+                    firstDecision.Status == AntonAwakeningAdmissionStatus.Allowed
+                    && secondDecision.Status
+                        == AntonAwakeningAdmissionStatus.Allowed
+                    && thirdDecision.Status
+                        == AntonAwakeningAdmissionStatus.Allowed
+                    && fourthDecision.Status
+                        == AntonAwakeningAdmissionStatus.MissingPrerequisites
+                    && fourthDecision.MissingDungeonIds.SequenceEqual(
+                        new[] { 245 }),
+                    ref failures);
+                Check(
+                    "dungeon outside the sequential definition is not gated",
+                    service.EvaluateAdmission(0, 9999).Status
+                        == AntonAwakeningAdmissionStatus.NotApplicable,
                     ref failures);
 
                 var ambiguousCatalog = SequentialDungeonDefinitionCatalog.Parse(
@@ -423,7 +448,7 @@ namespace DfoServer.SelfTests
                     characterA,
                     1202);
                 Check(
-                    "ambiguous entrance capability rejects admission",
+                    "ambiguous sequential definition rejects admission",
                     !ambiguousDecision.Allowed
                     && ambiguousDecision.Status
                         == AntonAwakeningAdmissionStatus.InvalidState,

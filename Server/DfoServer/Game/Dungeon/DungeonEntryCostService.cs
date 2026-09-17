@@ -998,6 +998,9 @@ namespace DfoServer.Game.Dungeon
 
     internal sealed class EntryCostResult
     {
+        private readonly List<int> _missingPrerequisiteDungeonIds =
+            new List<int>();
+
         public bool Success;
         public bool IsFreePass;
         public string FailReason;
@@ -1009,9 +1012,29 @@ namespace DfoServer.Game.Dungeon
         public int GoldCost;
         public int GoldBefore;
         public int GoldAfter;
+        public int TargetDungeonId { get; private set; }
+        public IReadOnlyList<int> MissingPrerequisiteDungeonIds =>
+            _missingPrerequisiteDungeonIds;
         public List<int> SelectedAlternativeIndexes { get; } =
             new List<int>();
         public List<ItemConsumeUpdate> ConsumedItems { get; } = new List<ItemConsumeUpdate>();
+
+        internal EntryCostResult FailMissingPrerequisites(
+            int targetDungeonId,
+            IEnumerable<int> missingDungeonIds)
+        {
+            TargetDungeonId = targetDungeonId;
+            _missingPrerequisiteDungeonIds.Clear();
+            _missingPrerequisiteDungeonIds.AddRange(
+                (missingDungeonIds ?? Array.Empty<int>())
+                    .Where(value => value > 0)
+                    .Distinct()
+                    .OrderBy(value => value));
+            return Fail(
+                "anton awakening prerequisites missing="
+                    + string.Join(",", _missingPrerequisiteDungeonIds),
+                EntryCostFailureKind.MissingPrerequisite);
+        }
 
         internal EntryCostResult Fail(
             string reason,

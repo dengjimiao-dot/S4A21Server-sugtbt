@@ -1091,6 +1091,12 @@ namespace DfoServer.Network.Handlers.Dungeon
                     }
                 }
 
+                var delivery = result.Outcome
+                    != AntonAwakeningRewardGrantOutcome.Granted
+                    ? "none"
+                    : result.DeliveredToMailbox
+                        ? "mailbox"
+                        : "inventory";
                 FileLogger.Log(
                     $"[AntonAwakening] reward committed: "
                     + $"cid={participant.CharacterId} "
@@ -1100,7 +1106,9 @@ namespace DfoServer.Network.Handlers.Dungeon
                     + $"item={entry.Reward.ItemId} "
                     + $"quantity={entry.Reward.Quantity} "
                     + $"state={entry.Reward.CardState} "
-                    + $"outcome={result.Outcome} event={plan.SourceEventId:N}");
+                    + $"outcome={result.Outcome} "
+                    + $"delivery={delivery} "
+                    + $"event={plan.SourceEventId:N}");
                 return true;
             }
             catch (Exception ex)

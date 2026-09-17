@@ -130,7 +130,7 @@ namespace DfoServer.Game.Dungeon
             int characterId,
             int dungeonId)
         {
-            var resolution = _catalog.ResolveEntranceByDungeonId(
+            var resolution = _catalog.ResolvePrimaryByDungeonId(
                 dungeonId,
                 out var definition);
             if (resolution == SequentialDungeonCapabilityResolution.Absent)
@@ -141,7 +141,7 @@ namespace DfoServer.Game.Dungeon
             if (resolution == SequentialDungeonCapabilityResolution.Ambiguous)
             {
                 FileLogger.Log(
-                    "[AntonAwakeningProgress] ambiguous entrance capability: "
+                    "[AntonAwakeningProgress] ambiguous admission definition: "
                     + $"dungeon={dungeonId}");
                 return new AntonAwakeningAdmissionDecision(
                     AntonAwakeningAdmissionStatus.InvalidState);
@@ -151,8 +151,22 @@ namespace DfoServer.Game.Dungeon
                 return new AntonAwakeningAdmissionDecision(
                     AntonAwakeningAdmissionStatus.NotApplicable);
             }
+            var targetIndex = definition.IndexOf(dungeonId);
+            if (targetIndex < 0)
+            {
+                FileLogger.Log(
+                    "[AntonAwakeningProgress] admission target missing from definition: "
+                    + $"dungeon={dungeonId} key={definition.GroupKey}");
+                return new AntonAwakeningAdmissionDecision(
+                    AntonAwakeningAdmissionStatus.InvalidState);
+            }
             if (characterId <= 0)
                 throw new ArgumentOutOfRangeException(nameof(characterId));
+            if (targetIndex == 0)
+            {
+                return new AntonAwakeningAdmissionDecision(
+                    AntonAwakeningAdmissionStatus.Allowed);
+            }
 
             var permissions = _repository.EnsureCurrentDayAndLoad(
                 characterId,
@@ -161,9 +175,9 @@ namespace DfoServer.Game.Dungeon
             var clearStates = GroupClearStates(permissions);
 
             var missing = new List<int>();
-            foreach (var prerequisiteDungeonId in
-                definition.PrerequisiteDungeonIds)
+            for (var index = 0; index < targetIndex; index++)
             {
+                var prerequisiteDungeonId = definition.DungeonIds[index];
                 if (!IsCompleted(
                         prerequisiteDungeonId,
                         definition.Difficulty,
