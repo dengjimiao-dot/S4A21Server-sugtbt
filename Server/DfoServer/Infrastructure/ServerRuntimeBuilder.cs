@@ -19,6 +19,7 @@ using DfoServer.Game.Party;
 using DfoServer.Game.Raid;
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Game.Session;
+using DfoServer.GameWorld;
 using DfoServer.Network;
 using DfoServer.Network.Handlers;
 using DfoServer.Network.Handlers.Pets;
@@ -144,6 +145,16 @@ namespace DfoServer.Infrastructure
             var accountRepository = new SqliteAccountRepository(Database);
             var rentalTimeProvider = SystemRentalTimeProvider.Instance;
             var dailyResetService = new DailyResetService(Database);
+            var sequentialCatalog =
+                SequentialDungeonDefinitionCatalog.Current;
+            var antonProgressRepository =
+                new AntonAwakeningDailyProgressRepository(
+                    Database,
+                    dailyResetService,
+                    sequentialCatalog);
+            var antonProgress = new AntonAwakeningDailyProgressService(
+                antonProgressRepository,
+                sequentialCatalog);
             var dungeonPersistentEffects =
                 new DungeonPersistentEffectApplicationService(
                     Database.ConnectionString,
@@ -159,7 +170,8 @@ namespace DfoServer.Infrastructure
                 characterRepository,
                 inventoryLifecycle,
                 rentalTimeProvider,
-                dailyResetService);
+                dailyResetService,
+                antonProgress);
             var getUserInfoTemplate = new SqliteUserInfoBlobRepository(Database)
                 .LoadGetUserInfoTemplate();
             var eventManager = new EventManager(Database);
@@ -171,6 +183,7 @@ namespace DfoServer.Infrastructure
                 characterRepository,
                 rentalTimeProvider,
                 dailyResetService,
+                antonProgress,
                 dungeonPersistentEffects,
                 experienceItemUseService,
                 selectCharacterDataSource,
@@ -546,7 +559,10 @@ namespace DfoServer.Infrastructure
                         inventory.TotalAttendance,
                     instanceRegistry: world.DungeonInstances,
                     raidManager: world.RaidManager,
-                    database: core.Database));
+                    database: core.Database,
+                    dailyResetService: core.DailyResetService,
+                    antonAwakeningProgress: core.AntonAwakeningProgress,
+                    overflowRewardSink: inventory.OverflowRewardSink));
         }
 
         internal GameProtocolSocialHandlers GetOrCreateGameProtocolSocialHandlers(
