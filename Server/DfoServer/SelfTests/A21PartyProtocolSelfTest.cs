@@ -2158,6 +2158,39 @@ var teleportBody = new byte[]
                     teleportBody.Take(6).ToArray(), out _),
                 ref failures);
 
+            var teleportLeaderPlayer = new Game.Session.PlayerContext
+            {
+                CurTownId = 1,
+                CurAreaId = 2,
+            };
+            Check(
+                "party teleport accepts a member in the same town and area",
+                TownHandler.IsPartyTeleportSameRoom(
+                    teleportLeaderPlayer,
+                    new Game.Session.PlayerContext
+                    {
+                        CurTownId = 1,
+                        CurAreaId = 2,
+                    })
+                && !TownHandler.IsPartyTeleportSameRoom(
+                    teleportLeaderPlayer,
+                    new Game.Session.PlayerContext
+                    {
+                        CurTownId = 1,
+                        CurAreaId = 3,
+                    })
+                && !TownHandler.IsPartyTeleportSameRoom(
+                    teleportLeaderPlayer,
+                    new Game.Session.PlayerContext
+                    {
+                        CurTownId = 2,
+                        CurAreaId = 2,
+                    })
+                && !TownHandler.IsPartyTeleportSameRoom(
+                    teleportLeaderPlayer,
+                    null),
+                ref failures);
+
             Check(
                 "town area permission gates below-level members",
                 !TownAreaPermissionPolicy.IsSatisfied(

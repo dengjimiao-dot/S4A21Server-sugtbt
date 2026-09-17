@@ -1,4 +1,4 @@
-using DfoServer.Network;
+﻿using DfoServer.Network;
 using DfoServer.Sqlite;
 using Microsoft.Data.Sqlite;
 using System;
@@ -63,6 +63,8 @@ namespace DfoServer
             ("--selftest-magic-box-protocol", SelfTests.MagicBoxProtocolSelfTest.Run),
             ("--selftest-gold-limit", SelfTests.GoldLimitSelfTest.Run),
             ("--selftest-friends", SelfTests.UnitedFriendSystemSelfTest.Run),
+            ("--selftest-a21-one-to-one-chat", SelfTests.A21OneToOneChatSelfTest.Run),
+            ("--selftest-a21-guild-creation", SelfTests.A21GuildCreationSelfTest.Run),
             ("--selftest-pvf-map-monster-parsing", SelfTests.PvfMapMonsterParsingSelfTest.Run),
             ("--selftest-sequential-dungeon-definition", SelfTests.SequentialDungeonDefinitionCatalogSelfTest.Run),
             ("--selftest-sequential-dungeon-daily-loot", SelfTests.SequentialDungeonDailyLootSelfTest.Run),
