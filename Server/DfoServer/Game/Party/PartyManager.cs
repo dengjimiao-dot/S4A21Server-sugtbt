@@ -603,7 +603,13 @@ namespace DfoServer.Game.Party
 
                 if (party.Count > 1)
                 {
-                    return LeaveLocked(userId) ??
+                    // The active dungeon cohort and its scene ownership keep
+                    // the entry PartyId for the lifetime of the instance.
+                    // Preserve that generation and every survivor slot while
+                    // transferring leadership in place.
+                    return LeaveLocked(
+                               userId,
+                               preservePartyOnLeaderExit: true) ??
                            PartyOpResult.Fail("not_in_party");
                 }
 
@@ -638,7 +644,11 @@ namespace DfoServer.Game.Party
                 if (party.PartyId != expectedPartyId)
                     return PartyOpResult.Fail("party_generation_mismatch");
 
-                return LeaveLocked(userId) ??
+                // Stale-session cleanup is still part of the same frozen
+                // dungeon return operation and must not replace PartyId.
+                return LeaveLocked(
+                           userId,
+                           preservePartyOnLeaderExit: true) ??
                        PartyOpResult.Fail("not_in_party");
             }
         }
@@ -674,9 +684,10 @@ namespace DfoServer.Game.Party
                 var next = party.MembersBySlot()[0];
                 if (preservePartyOnLeaderExit)
                 {
-                    // A disconnected leader leaves the existing party in
-                    // place. The lowest occupied slot inherits leadership;
-                    // every surviving member keeps the same UI slot.
+                    // A disconnected or in-dungeon returning leader leaves
+                    // the existing party generation in place. The lowest
+                    // occupied slot inherits leadership; every surviving
+                    // member keeps the same UI slot.
                     party.LeaderUserId = next.UserId;
                     result.LeaderChanged = true;
                     result.NewLeaderUserId = next.UserId;
