@@ -338,6 +338,7 @@ namespace DfoServer.Network
 
             if (header.cmd == 1)
             {
+                await _socialHandlers.Trade.CancelBeforeTransition(session, header.type);
                 if (_cmdDispatch.TryGetValue(header.type, out var handler))
                     await handler(session, header, body);
                 else
@@ -385,8 +386,13 @@ namespace DfoServer.Network
             d[0x000C] = _partyHandler.Handle_SET_PARTY_INFO;        // 12 创建/更新队伍
             d[0x000D] = _partyHandler.Handle_LEAVE_PARTY;          // 13 leave party
             d[0x000E] = _partyHandler.Handle_WALKOUT_PARTY_MEMBER;  // 14 踢人
-            d[0x000A] = _partyHandler.Handle_REQUEST_PEER;          // 10 右键同屏玩家→组队/交易邀请(按uid)→给目标发 SC 0x0007 弹框
-            d[0x000B] = _partyHandler.Handle_RES_PEER;              // 11 被邀请者应答: type0 7B接受/9B拒绝；仅接受才组队
+            d[(ushort)CmdPacketTypeA21.REQUEST_PEER] = (s, h, b) =>
+                Network.Parsers.Inventory.ItemTradeRequest.IsTradePeer(b)
+                    ? _socialHandlers.Trade.Request(s, h, b) : _partyHandler.Handle_REQUEST_PEER(s, h, b);
+            d[(ushort)CmdPacketTypeA21.RESPONSE_PEER] = (s, h, b) =>
+                Network.Parsers.Inventory.ItemTradeRequest.IsTradePeer(b)
+                    ? _socialHandlers.Trade.Respond(s, h, b) : _partyHandler.Handle_RES_PEER(s, h, b);
+            d[(ushort)CmdPacketTypeA21.SET_ITEMTRADE_STATE] = _socialHandlers.Trade.State;
             d[0x00A6] = _partyHandler.Handle_CALL_PARTY_MEMBER_REALTIME_INFO;  // 166 请求成员实时信息(HP%)
             d[0x0079] = _partyHandler.Handle_CHANGE_HOST;           // 121 委托队长(body=1字节槽位)
             // P2P 上报类: df 只喂统计计数器, 不回包不转发。收下即忽略, 消掉 Unhandled 日志。
@@ -458,6 +464,8 @@ namespace DfoServer.Network
             };                                                                    //18
             d[0x0013] = async (s, h, b) =>
             {
+                if (await _socialHandlers.Trade.TryMove(s, h, b))
+                    return;
                 if (await _dungeonHandler.TryHandleDeathTowerMoveItem(s, h, b))
                     return;
                 if (await _knightShieldHandler.TryHandleMoveItemSpace(s, h, b))

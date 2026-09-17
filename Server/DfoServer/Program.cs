@@ -24,6 +24,7 @@ namespace DfoServer
             ("--selftest-a21-user-channel", SelfTests.A21UserChannelSelfTest.Run),
             ("--selftest-a21-create-character-protocol", SelfTests.A21CreateCharacterProtocolSelfTest.Run),
             ("--selftest-a21-party-protocol", SelfTests.A21PartyProtocolSelfTest.Run),
+            ("--selftest-item-trade", SelfTests.ItemTradeSelfTest.Run),
             ("--selftest-a21-solo-teleport-protocol", SelfTests.A21SoloTeleportProtocolSelfTest.Run),
             ("--selftest-a21-knight-shield-deck", SelfTests.A21KnightShieldDeckSelfTest.Run),
             ("--selftest-a21-tutorial-protocol", SelfTests.A21TutorialProtocolSelfTest.Run),

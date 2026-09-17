@@ -1520,9 +1520,7 @@ namespace DfoServer.Network.Handlers
                 && !_blacklist.IsBlocked(targetCharacterId, cid) && !_blacklist.IsBlocked(cid, targetCharacterId);
             if (!CanInvite()) return;
 
-            // ★交易 阶段1: reqType==1 = ENUM_PEER_REQUEST_TYPE TRADE → 给对方弹【交易确认窗】(而非组队框)。
-            //   交易形态 body = 11B [A.uid:2][01][peer:4][createTime:4](含 peer, 漏了长度不符被客户端静默丢弃→不弹窗)。
-            //   阶段2(放置道具窗/换物)待专项; 此处保证交易请求不弹成组队框, 且 accept 不误组队(见 RES_PEER)。
+            // Trade requests are routed to ItemTradeHandler by GameProtocolHandler.
             if (reqType == 2)
             {
                 if (body.Length != 7 ||
@@ -1538,39 +1536,6 @@ namespace DfoServer.Network.Handlers
                     session,
                     targetSession,
                     peerInt);
-                return;
-            }
-
-            if (reqType == 1)
-            {
-                if (!await RunCurrentPartyPairMutationAsync(
-                        session,
-                        targetSession,
-                        () => { }))
-                {
-                    return;
-                }
-
-                var tw = new GamePacketWriter();
-                tw.WriteUInt16(inviterUid);   // A.uid
-                tw.WriteByte(1);              // ENUM_PEER_REQUEST_TYPE = 1 TRADE
-                tw.WriteInt32(peerInt);       // peer(回传请求里的 peer)
-                tw.WriteInt32(0);             // A.createTime(阶段1先填0)
-                bool tradeDelivered = false;
-                var tradeSent = await Game.Session.SessionDirectory
-                    .TrySendBestEffortAsync(
-                        async cancellationToken =>
-                            tradeDelivered = await targetSession.TrySendPacketAsync(
-                                GamePacketEnvelopeBuilder.Build(
-                                    0x00,
-                                    0x0007,
-                                    tw.ToArray()),
-                                cancellationToken, CanInvite),
-                        $"trade invite target={targetUid}");
-                if (tradeSent && tradeDelivered)
-                {
-                    FileLogger.Log($"[{ProtocolName}] TRADE REQUEST_PEER A={inviterUid}->B={targetUid} → SC 0x0007 交易形态(11B, ⚠️阶段2待实现)");
-                }
                 return;
             }
 
@@ -1815,11 +1780,9 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            // ★交易 accept(reqType==1)绝不组队。df 交易走独立 CTradeSpace 路径, 与 party join 无关。
-            //   阶段2(开道具放置窗 + 换物)待专项; 此处止血: 交易同意不再误组队。
+            // Trade responses belong exclusively to ItemTradeHandler.
             if (reqType == 1)
             {
-                FileLogger.Log($"[{ProtocolName}] RES_PEER TRADE accept: A={inviterUid} B={accepterUid} → 交易已确认(不组队); ⚠️阶段2放置窗/换物待实现");
                 return;
             }
             var (icid, iaid) = SessionOwnerResolver.Resolve(inviterSession);
