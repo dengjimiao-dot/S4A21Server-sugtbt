@@ -68,7 +68,9 @@ namespace DfoServer.Network.Handlers
         {
             lock (_conversationLock)
                 return _activeConversations.TryGetValue(conversation.Key, out var current)
-                    && ReferenceEquals(current, conversation) && conversation.IsCurrent(_sessions);
+                    && ReferenceEquals(current, conversation) && conversation.IsCurrent(_sessions)
+                    && !IsBlocked(conversation.First.CharacterId, conversation.Second.CharacterId)
+                    && !IsBlocked(conversation.Second.CharacterId, conversation.First.CharacterId);
         }
 
         private sealed class ConversationMember

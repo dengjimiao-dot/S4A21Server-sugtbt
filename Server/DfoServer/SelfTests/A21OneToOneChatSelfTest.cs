@@ -263,7 +263,7 @@ namespace DfoServer.SelfTests
             return GamePacketEnvelopeBuilder.Build(0, (ushort)NotiPacketTypeA21.LEAVE_USER_FROM_GROUP, w.ToArray());
         }
 
-        private sealed class Peer : IDisposable
+        internal sealed class Peer : IDisposable
         {
             private readonly TcpClient _reader;
             internal EnhancedClientSession Session { get; }

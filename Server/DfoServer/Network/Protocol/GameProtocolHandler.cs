@@ -941,6 +941,11 @@ namespace DfoServer.Network
             GameCommandRegistry.GameCommandRegistrationGroup d)
         {
             UnitedFriendSystem.RegisterHandlers(d, _worldDependencies.Sessions, _characterTransitions);
+            var repository = new Game.Friends.BlacklistRepository(_database);
+            var projection = new Game.Friends.BlacklistProjection(repository, _worldDependencies.Sessions);
+            UnitedFriendSystem.ConfigureBlacklist(_worldDependencies.Sessions, projection);
+            new BlacklistHandler(repository, _characterTransitions, projection).RegisterHandlers(d);
+            new UserChannelHandler(_worldDependencies.Sessions, _characterTransitions).RegisterHandlers(d);
         }
 
         private void RegisterEventJoustHandlers(

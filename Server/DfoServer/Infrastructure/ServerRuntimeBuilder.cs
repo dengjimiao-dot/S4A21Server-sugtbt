@@ -625,6 +625,7 @@ namespace DfoServer.Infrastructure
                 world.Sessions,
                 world.PartyManager,
                 world.CharacterTransitions);
+            chat.ConfigureBlacklist(new Game.Friends.BlacklistRepository(core.Database));
             townDungeon.Town.ConfigureDungeonGiveupPartyDeparture(
                 party.HandleDungeonGiveupWithinTransitionAsync);
             townDungeon.Town.ConfigureTownPartyListPublisher(
