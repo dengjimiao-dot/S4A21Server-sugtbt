@@ -623,7 +623,8 @@ namespace DfoServer.Infrastructure
                 world.RaidManager);
             var chat = new ChatHandler(
                 world.Sessions,
-                world.PartyManager);
+                world.PartyManager,
+                world.CharacterTransitions);
             townDungeon.Town.ConfigureDungeonGiveupPartyDeparture(
                 party.HandleDungeonGiveupWithinTransitionAsync);
             townDungeon.Town.ConfigureTownPartyListPublisher(
