@@ -945,12 +945,7 @@ namespace DfoServer.Network
         private void RegisterFriendHandlers(
             GameCommandRegistry.GameCommandRegistrationGroup d)
         {
-            d[(ushort)CmdPacketTypeA21.ADD_UNITED_SERVER_FRIEND] =
-                (s, h, b) => UnitedFriendSystem.HandleAddUnitedServerFriend(
-                    s, h, b, _worldDependencies.Sessions);
-            d[(ushort)CmdPacketTypeA21.DELETE_UNITED_SERVER_FRIEND] =
-                (s, h, b) => UnitedFriendSystem.HandleDeleteUnitedServerFriend(
-                    s, h, b, _worldDependencies.Sessions);
+            UnitedFriendSystem.RegisterHandlers(d, _worldDependencies.Sessions, _characterTransitions);
         }
 
         private void RegisterEventJoustHandlers(
