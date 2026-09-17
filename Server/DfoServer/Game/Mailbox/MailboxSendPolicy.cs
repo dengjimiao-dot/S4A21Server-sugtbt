@@ -25,6 +25,16 @@ namespace DfoServer.Game.Mailbox
                     : MailboxSendError.LimitedPeriodItem;
             }
 
+            return ValidateTransferability(request, core);
+        }
+
+        // Shared instance/PVF rules only. Each transfer channel owns its
+        // expiration policy; mail's limited-period ban is not a direct-trade rule.
+        internal static MailboxSendError ValidateTransferability(MailboxSendRequest request, ItemCore core)
+        {
+            if (core == null || core.ItemId <= 0)
+                return MailboxSendError.InvalidAttachment;
+
             // The client stores the instance-level transfer restriction in the
             // common 84-byte item tail at offset 76 (tailData2F[29]). This is
             // independent from the PVF attach type and the attr high-bit trade
@@ -111,10 +121,9 @@ namespace DfoServer.Game.Mailbox
         public static MailboxSendError ValidateDeferredPolicies(MailboxSendRequest request)
         {
             // Integration point for policies whose authoritative state does not exist yet:
-            // blacklist (77/90 requires client-version confirmation), sender and receiver
-            // trade restrictions (114/115), illegal text (159), and level/send count
-            // limits (227). Receiver-level gold (14) and daily gold (70) are enforced by
-            // MailboxRepository with authoritative database state.
+            // sender and receiver trade restrictions (114/115), illegal text (159),
+            // and level/send count limits (227). Blacklist, receiver-level gold (14)
+            // and daily gold (70) are enforced in the MailboxRepository transaction.
             return MailboxSendError.None;
         }
 

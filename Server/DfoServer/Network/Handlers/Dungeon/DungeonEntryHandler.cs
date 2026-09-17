@@ -1072,12 +1072,14 @@ namespace DfoServer.Network.Handlers.Dungeon
                 session,
                 wireType,
                 DungeonAdmissionReject.InvalidSelectionState);
-            await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                0x00,
-                (ushort)NotiPacketType.SERVER_NOTICE_MESSAGE,
-                ServerNoticeMessageBuilder.Build(
-                    RaidSelectionRestrictionMessage)));
+            await session.SendPacketAsync(BuildRaidSelectionRestrictionNotice());
         }
+
+        internal static byte[] BuildRaidSelectionRestrictionNotice()
+            => GamePacketEnvelopeBuilder.Build(
+                0x00,
+                (ushort)NotiPacketTypeA21.SERVER_NOTICE_MESSAGE,
+                ServerNoticeMessageBuilder.BuildRaidNotice(RaidSelectionRestrictionMessage));
 
         private DungeonPartySelectionCohort CapturePartySelectionCohort(
             EnhancedClientSession leader,

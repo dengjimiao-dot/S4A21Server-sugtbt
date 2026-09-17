@@ -3,9 +3,12 @@ using DfoServer.Game.CharacterData;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Friends;
 using DfoServer.Game.Party;
+using DfoServer.Game.Raid;
+using DfoServer.Game.Session;
 using DfoServer.Infrastructure;
 using DfoServer.Network.Builders;
 using DfoServer.Network.Builders.Party;
+using DfoServer.Network.Builders.Raid;
 using DfoServer.Network.Parsers.Party;
 using System;
 using System.Collections.Generic;
@@ -22,7 +25,243 @@ namespace DfoServer.Network.Handlers
     // ⚠️ 响应帧照 df 逆向(PARTY_INFO 无活体样本), 需真机验证客户端渲染(参 compound #432 教训)。
     public sealed class PartyHandler : IDisposable
     {
+        private sealed class PendingRaidPeer
+        {
+            public Guid InviterSessionId { get; }
+            public Guid TargetSessionId { get; }
+            public RaidSnapshot Raid { get; }
+            public ushort JoinerUserId { get; }
+            public long ExpiresAtMilliseconds { get; }
+
+            public PendingRaidPeer(Guid inviterSessionId, Guid targetSessionId, RaidSnapshot raid, ushort joinerUserId, long expiresAtMilliseconds)
+            {
+                InviterSessionId = inviterSessionId;
+                TargetSessionId = targetSessionId;
+                Raid = raid;
+                JoinerUserId = joinerUserId;
+                ExpiresAtMilliseconds = expiresAtMilliseconds;
+            }
+        }
+
+        private RaidHandler _raidHandler;
+
+        private readonly Dictionary<(ushort Inviter, ushort Target), PendingRaidPeer> _pendingRaidPeers = new Dictionary<(ushort, ushort), PendingRaidPeer>();
+
+        internal Func<long> RaidPeerClockMilliseconds { get; set; } = () => Environment.TickCount64;
+
+        internal void AttachRaidHandler(RaidHandler raidHandler)
+        {
+            _raidHandler = raidHandler ?? throw new ArgumentNullException("raidHandler");
+            raidHandler.PreparationPartiesReady = _partyManager.ArePreparedRaidPartiesReady;
+            raidHandler.PreparationPartyOrder = _partyManager.ResolveRaidPreparationOrder;
+            raidHandler.LivePartyAssignment = ReassignLiveRaidPartyAsync;
+        }
+
+        private async Task<RaidSnapshot> ReassignLiveRaidPartyAsync(EnhancedClientSession actor, RaidSnapshot expected, ushort targetId, ushort index)
+        {
+            RaidMember target = expected.Members.FirstOrDefault((RaidMember m) => m.UserId == targetId);
+            if (target == null || _characterTransitions == null)
+            {
+                return null;
+            }
+
+            RaidMember[] source = expected.Members.Where((RaidMember m) => m.UserId == targetId || m.UserId == expected.LeaderUserId || (target.PartyIndex != 0 && m.PartyIndex == target.PartyIndex) || (index != 0 && m.PartyIndex == index)).ToArray();
+            List<EnhancedClientSession> sessions = new List<EnhancedClientSession>();
+            foreach (RaidMember item in source.OrderBy((RaidMember m) => m.CharacterId))
+            {
+                if (!_sessions.TryGet(checked((int)item.CharacterId), out var session) || session.SessionId != item.SessionId || session.ListenerPort != actor.ListenerPort)
+                {
+                    return null;
+                }
+
+                sessions.Add(session);
+            }
+
+            RaidSnapshot updated = null;
+            await RunWithDungeonSelectionAndEntryPartyTransitionGatesAsync(async delegate
+            {
+                List<IDisposable> leases = new List<IDisposable>();
+                try
+                {
+                    foreach (EnhancedClientSession item2 in sessions)
+                    {
+                        IDisposable disposable = await _characterTransitions.AcquireIfCurrentAsync(item2);
+                        if (disposable == null)
+                        {
+                            return;
+                        }
+
+                        leases.Add(disposable);
+                    }
+
+                    if (IsDirectoryCurrent(actor) && !sessions.Any((EnhancedClientSession s) => !IsDirectoryCurrent(s) || s.Player.CurrentRun != null || s.Player.CurrentDungeonSelection != null))
+                    {
+                        EnhancedClientSession enhancedClientSession = sessions.Single((EnhancedClientSession s) => s.Player.UserId == targetId);
+                        PartyMember moving = BuildMember(enhancedClientSession, enhancedClientSession.Player.CharacterId);
+                        List<Party> retired = null;
+                        List<Party> formed = null;
+                        if (_raidHandler.CommitLivePartyAssignment(expected, actor.Player.UserId, actor.SessionId, targetId, index, (IReadOnlyList<RaidMember> roster) => _partyManager.ReassignLiveRaidMember(roster, moving, index, out retired, out formed), out updated))
+                        {
+                            foreach (Party old in retired)
+                            {
+                                await CloseRelayRoomAsync(old.PartyId);
+                                foreach (PartyMember member2 in old.Members)
+                                {
+                                    await SendPartyClearBestEffortAsync(sessions.Single((EnhancedClientSession s) => s.Player.UserId == member2.UserId), old, "raid-live-reassignment");
+                                }
+                            }
+
+                            foreach (Party item3 in formed)
+                            {
+                                await BroadcastPartyInfo(item3.PartyId);
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    for (int num = leases.Count - 1; num >= 0; num--)
+                    {
+                        leases[num].Dispose();
+                    }
+                }
+            }, sessions.ToArray());
+            return updated;
+        }
+
+        public async Task<bool> RequestRaidPeerAsync(EnhancedClientSession inviterSession, EnhancedClientSession targetSession, int peerInt)
+        {
+            if (inviterSession == null || targetSession == null || _raidHandler == null || !IsSameGameChannel(inviterSession, targetSession) || !GameNetworkConfig.IsRaidListener(inviterSession.ListenerPort))
+            {
+                return false;
+            }
+
+            int item = SessionOwnerResolver.Resolve(inviterSession).characterId;
+            int item2 = SessionOwnerResolver.Resolve(targetSession).characterId;
+            ushort inviterUid = (ushort)item;
+            ushort targetUid = (ushort)item2;
+            PendingRaidPeer invitation = null;
+            if (!(await RunCurrentPartyPairMutationAsync(inviterSession, targetSession, delegate
+            {
+                if (!_raidHandler.TryCreateRaidPeerRequest(inviterSession, targetSession, out var raid, out var joinerUserId))
+                {
+                    return;
+                }
+
+                lock (_pendingRaidPeers)
+                {
+                    long now = RaidPeerClockMilliseconds();
+                    (ushort, ushort)[] array = (
+                        from p in _pendingRaidPeers
+                        where p.Value.ExpiresAtMilliseconds <= now
+                        select p.Key).ToArray();
+                    foreach ((ushort, ushort) key in array)
+                    {
+                        _pendingRaidPeers.Remove(key);
+                    }
+
+                    if (!_pendingRaidPeers.TryGetValue((inviterUid, targetUid), out var value2) || !(value2.InviterSessionId == inviterSession.SessionId) || !(value2.TargetSessionId == targetSession.SessionId) || !(value2.Raid.InstanceId == raid.InstanceId) || !(value2.Raid.LeadershipVersion == raid.LeadershipVersion))
+                    {
+                        array = (
+                            from p in _pendingRaidPeers
+                            where p.Value.JoinerUserId == joinerUserId
+                            select p.Key).ToArray();
+                        foreach ((ushort, ushort) key2 in array)
+                        {
+                            _pendingRaidPeers.Remove(key2);
+                        }
+
+                        invitation = new PendingRaidPeer(inviterSession.SessionId, targetSession.SessionId, raid, joinerUserId, now + 60000);
+                        _pendingRaidPeers[(inviterUid, targetUid)] = invitation;
+                    }
+                }
+            })) || invitation == null)
+            {
+                FileLogger.Log($"[GameProtocol] RAID peer request ignored by={inviterUid} target={targetUid}: invalid or already pending");
+                return false;
+            }
+
+            byte[] context = RaidHandler.BuildRaidFormationUserContextPacket(inviterSession);
+            byte[] inviteBody = RaidPacketBuilder.BuildPeerInvite(inviterUid, peerInt);
+            bool flag = context != null;
+            if (flag)
+            {
+                flag = await SessionDirectory.TrySendBestEffortAsync(async delegate (CancellationToken cancellationToken)
+                {
+                    await targetSession.SendPacketAsync(context, cancellationToken);
+                    await targetSession.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0, (ushort)NotiPacketTypeA21.REQUEST_PEER, inviteBody), cancellationToken);
+                }, $"raid peer invite target={targetUid}");
+            }
+
+            bool flag2 = flag;
+            if (!flag2)
+            {
+                lock (_pendingRaidPeers)
+                {
+                    if (_pendingRaidPeers.TryGetValue((inviterUid, targetUid), out var value) && value == invitation)
+                    {
+                        _pendingRaidPeers.Remove((inviterUid, targetUid));
+                    }
+                }
+            }
+
+            FileLogger.Log($"[GameProtocol] RAID peer request by={inviterUid} target={targetUid} joiner={invitation.JoinerUserId} raid={invitation.Raid.RaidId} instance={invitation.Raid.InstanceId} forwarded={flag2}");
+            return flag2;
+        }
+
+        internal static bool IsAcceptedRaidPeerResponse(byte[] body)
+        {
+            if (body != null && body.Length == 7 && body[2] == 10)
+            {
+                return BitConverter.ToUInt32(body, 3) == 0;
+            }
+
+            return false;
+        }
+
+        private async Task HandleRaidPeerResponseAsync(EnhancedClientSession session, EnhancedClientSession inviterSession, ushort inviterUid, ushort accepterUid, byte[] body)
+        {
+            PendingRaidPeer value;
+            lock (_pendingRaidPeers)
+            {
+                _pendingRaidPeers.TryGetValue((inviterUid, accepterUid), out value);
+                if (value == null || value.InviterSessionId != inviterSession.SessionId || value.TargetSessionId != session.SessionId)
+                {
+                    FileLogger.Log($"[GameProtocol] RAID RES_PEER ignored: no matching request inviter={inviterUid} accepter={accepterUid}");
+                    return;
+                }
+
+                _pendingRaidPeers.Remove((inviterUid, accepterUid));
+            }
+
+            if (value.ExpiresAtMilliseconds <= RaidPeerClockMilliseconds())
+            {
+                FileLogger.Log($"[GameProtocol] RAID RES_PEER expired inviter={inviterUid} accepter={accepterUid}");
+                await SendRaidPeerFailureAsync(inviterSession, "攻坚队申请/邀请已过期，请重新发送。");
+            }
+            else if (!IsAcceptedRaidPeerResponse(body))
+            {
+                FileLogger.Log($"[{"GameProtocol"}] RAID RES_PEER rejected/canceled inviter={inviterUid} accepter={accepterUid} body={((body == null) ? "null" : BitConverter.ToString(body))}");
+                await SendRaidPeerFailureAsync(inviterSession, "对方拒绝了您的攻坚队邀请/申请。");
+            }
+            else if (_raidHandler != null)
+            {
+                bool flag = await _raidHandler.HandleRaidPeerAcceptAsync(session, inviterSession, value.Raid, value.JoinerUserId);
+                FileLogger.Log($"[GameProtocol] RAID RES_PEER confirmed inviter={inviterUid} accepter={accepterUid} raid={value.Raid.RaidId} joined={flag}");
+                if (!flag)
+                {
+                    await SendRaidPeerFailureAsync(inviterSession, "攻坚队申请/邀请已失效，请重新发送。");
+                }
+            }
+        }
+
+        private static Task<bool> SendRaidPeerFailureAsync(EnhancedClientSession session, string message)
+        {
+            return SessionDirectory.TrySendBestEffortAsync((CancellationToken ct) => session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0, (ushort)NotiPacketTypeA21.SERVER_NOTICE_MESSAGE, ServerNoticeMessageBuilder.BuildRaidNotice(message, 0)), ct), "raid peer result");
+        }
+
         private readonly PartyManager _partyManager;
+        private readonly BlacklistRepository _blacklist;
         private readonly ICharacterRepository _characterRepository;
         private readonly SqliteSubtype0FieldsRepository _subtype0Repository;
         private readonly HonorLevelSyncService _honorLevel;
@@ -62,6 +301,7 @@ namespace DfoServer.Network.Handlers
             _partyManager = partyManager;
             _characterRepository = characterRepository;
             database ??= GameDatabase.CreateDefault();
+            _blacklist = new BlacklistRepository(database);
             _subtype0Repository = new SqliteSubtype0FieldsRepository(database);
             _honorLevel = new HonorLevelSyncService(characterRepository, database);
             _sessions = sessions;
@@ -148,6 +388,15 @@ namespace DfoServer.Network.Handlers
 
         private async Task OnSessionEndingAsync(int characterId, EnhancedClientSession dying)
         {
+            lock (_pendingRaidPeers)
+            {
+                foreach (var pending in _pendingRaidPeers.Where(p =>
+                    p.Value.InviterSessionId == dying.SessionId ||
+                    p.Value.TargetSessionId == dying.SessionId).ToArray())
+                {
+                    _pendingRaidPeers.Remove(pending.Key);
+                }
+            }
             await _partyListPublishGate.WaitAsync();
             try
             {
@@ -570,30 +819,33 @@ namespace DfoServer.Network.Handlers
                     session,
                     () =>
                     {
-                        party = _partyManager.GetPartyByUser(uid);
-                        if (party == null)
-                        {
-                            createdResult =
-                                _partyManager.CreateParty(member);
-                            party = createdResult.Party;
-                        }
                         var titleBytes =
                             (req.Title != null &&
                              req.Title.Length > 0)
                                 ? req.Title
                                 : leaderName;
-                        settingsResult = _partyManager.UpdateSettings(
-                            uid,
-                            session.SessionId,
-                            titleBytes,
-                            req.UserMax,
-                            req.Raw);
+                        if (_raidHandler == null)
+                        {
+                            CommitSettings(null);
+                        }
+                        else if (!_raidHandler.TryCommitPartySettings(
+                            uid, session.SessionId, CommitSettings))
+                        {
+                            settingsResult = PartyOpResult.Fail("stale_raid_session");
+                        }
                         if (!settingsResult.Ok)
                         {
                             failureReason = settingsResult.Reason;
                             return;
                         }
                         party = settingsResult.Party;
+
+                        void CommitSettings(IReadOnlyList<RaidMember> roster)
+                        {
+                            settingsResult = _partyManager.SetPartyInfo(
+                                member, titleBytes, req.UserMax, req.Raw,
+                                roster, out createdResult);
+                        }
                     }))
             {
                 return;
@@ -613,7 +865,7 @@ namespace DfoServer.Network.Handlers
             await NotifyPriorPartyAsync(
                 createdResult?.PriorPartyLeave);
 
-            FileLogger.Log($"[{ProtocolName}] SET_PARTY_INFO uid={uid} party={party.PartyId} settings={System.BitConverter.ToString(req.Raw)} members={party.Count}");
+            FileLogger.Log($"[{ProtocolName}] SET_PARTY_INFO uid={uid} party={party.PartyId} settings={System.BitConverter.ToString(party.PartyInfoBlock)} members={party.Count}");
 
             if (createdResult != null)
             {
@@ -663,12 +915,17 @@ namespace DfoServer.Network.Handlers
             var expectedRun = session?.Player?.CurrentRun;
 
             PartyOpResult result = null;
+            RaidSnapshot raidAfterLeave = null;
             if (!await RunCurrentPartyMutationAsync(
                     session,
                     () =>
                     {
-                        result = _partyManager.Leave(
-                            uid, session.SessionId);
+                        result = _raidHandler == null
+                            ? _partyManager.Leave(uid, session.SessionId)
+                            : _raidHandler.LeaveNormalParty(
+                                uid, session.SessionId,
+                                () => _partyManager.Leave(uid, session.SessionId),
+                                out raidAfterLeave);
                     }))
             {
                 return;
@@ -700,10 +957,18 @@ namespace DfoServer.Network.Handlers
                 }
                 finally
                 {
-                    // 无论离队者 socket/回城是否失败，都必须发布服务端已提交的队伍代际。
-                    await PublishCommittedDepartureAsync(
-                        result,
-                        $"leave-party uid={uid}");
+                    try
+                    {
+                        if (raidAfterLeave != null)
+                            await _raidHandler.PublishNormalPartyLeftAsync(raidAfterLeave, uid);
+                    }
+                    finally
+                    {
+                        // 无论离队者 socket/回城是否失败，都必须发布服务端已提交的队伍代际。
+                        await PublishCommittedDepartureAsync(
+                            result,
+                            $"leave-party uid={uid}");
+                    }
                 }
             }
         }
@@ -1247,10 +1512,15 @@ namespace DfoServer.Network.Handlers
             }
             if (targetUid == inviterUid)
                 return;
+            int targetCharacterId = targetSession.Player.CharacterId;
+            bool CanInvite() => session.Player.CharacterId == cid
+                && targetSession.Player.CharacterId == targetCharacterId
+                && _sessions.TryGet(cid, out var currentSender) && ReferenceEquals(currentSender, session)
+                && _sessions.TryGet(targetCharacterId, out var currentTarget) && ReferenceEquals(currentTarget, targetSession)
+                && !_blacklist.IsBlocked(targetCharacterId, cid) && !_blacklist.IsBlocked(cid, targetCharacterId);
+            if (!CanInvite()) return;
 
-            // ★交易 阶段1: reqType==1 = ENUM_PEER_REQUEST_TYPE TRADE → 给对方弹【交易确认窗】(而非组队框)。
-            //   交易形态 body = 11B [A.uid:2][01][peer:4][createTime:4](含 peer, 漏了长度不符被客户端静默丢弃→不弹窗)。
-            //   阶段2(放置道具窗/换物)待专项; 此处保证交易请求不弹成组队框, 且 accept 不误组队(见 RES_PEER)。
+            // Trade requests are routed to ItemTradeHandler by GameProtocolHandler.
             if (reqType == 2)
             {
                 if (body.Length != 7 ||
@@ -1269,35 +1539,10 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            if (reqType == 1)
+            if (reqType == 10)
             {
-                if (!await RunCurrentPartyPairMutationAsync(
-                        session,
-                        targetSession,
-                        () => { }))
-                {
-                    return;
-                }
-
-                var tw = new GamePacketWriter();
-                tw.WriteUInt16(inviterUid);   // A.uid
-                tw.WriteByte(1);              // ENUM_PEER_REQUEST_TYPE = 1 TRADE
-                tw.WriteInt32(peerInt);       // peer(回传请求里的 peer)
-                tw.WriteInt32(0);             // A.createTime(阶段1先填0)
-                var tradeSent = await Game.Session.SessionDirectory
-                    .TrySendBestEffortAsync(
-                        cancellationToken =>
-                            targetSession.SendPacketAsync(
-                                GamePacketEnvelopeBuilder.Build(
-                                    0x00,
-                                    0x0007,
-                                    tw.ToArray()),
-                                cancellationToken),
-                        $"trade invite target={targetUid}");
-                if (tradeSent)
-                {
-                    FileLogger.Log($"[{ProtocolName}] TRADE REQUEST_PEER A={inviterUid}->B={targetUid} → SC 0x0007 交易形态(11B, ⚠️阶段2待实现)");
-                }
+                if (body.Length == 7)
+                    await RequestRaidPeerAsync(session, targetSession, peerInt);
                 return;
             }
 
@@ -1317,6 +1562,7 @@ namespace DfoServer.Network.Handlers
                     targetSession,
                     () =>
                     {
+                        if (!CanInvite()) return;
                         inviteRecorded = _partyManager.RecordInvite(
                             targetUid,
                             targetSession.SessionId,
@@ -1348,25 +1594,26 @@ namespace DfoServer.Network.Handlers
             w.WriteUInt16(0);            // 疲劳(待真机校准)
             w.WriteUInt16(0);            // 体力
             w.WriteUInt16(0);
+            bool delivered = false;
             var inviteSent = await Game.Session.SessionDirectory
                 .TrySendBestEffortAsync(
                     async cancellationToken =>
                     {
                         if (inviteContext != null)
                         {
-                            await targetSession.SendPacketAsync(
+                            await targetSession.TrySendPacketAsync(
                                 inviteContext,
-                                cancellationToken);
+                                cancellationToken, CanInvite);
                         }
-                        await targetSession.SendPacketAsync(
+                        delivered = await targetSession.TrySendPacketAsync(
                             GamePacketEnvelopeBuilder.Build(
                                 0x00,
                                 (ushort)NotiPacketTypeA21.REQUEST_PEER,
                                 w.ToArray()),
-                            cancellationToken);
+                            cancellationToken, CanInvite);
                     },
                     $"party invite target={targetUid}");
-            if (inviteSent)
+            if (inviteSent && delivered)
             {
                 FileLogger.Log(
                     $"[{ProtocolName}] REQUEST_PEER → 给 uid={targetUid} " +
@@ -1433,7 +1680,8 @@ namespace DfoServer.Network.Handlers
             }
             if (reqType != 0 &&
                 reqType != 1 &&
-                reqType != 2)
+                reqType != 2 &&
+                reqType != 10)
             {
                 FileLogger.Log(
                     $"[{ProtocolName}] RES_PEER: unsupported type={reqType}");
@@ -1447,6 +1695,12 @@ namespace DfoServer.Network.Handlers
                     await SendPvpInviteFailureAsync(session, 3);
                 return;
             }
+            if (_blacklist.IsBlocked(acid, inviterSession.Player.CharacterId)
+                || _blacklist.IsBlocked(inviterSession.Player.CharacterId, acid))
+            {
+                _partyManager.CancelInvite(accepterUid, session.SessionId, inviterUid, inviterSession.SessionId);
+                return;
+            }
             if (!IsSameGameChannel(session, inviterSession))
             {
                 FileLogger.Log(
@@ -1454,6 +1708,23 @@ namespace DfoServer.Network.Handlers
                     $"from={session.ListenerPort} to={inviterSession.ListenerPort}");
                 if (reqType == 2)
                     await SendPvpInviteFailureAsync(session, 19);
+                return;
+            }
+
+            if (reqType == 10)
+            {
+                if (_characterTransitions != null)
+                {
+                    await _characterTransitions.RunIfBothCurrentAsync(
+                        inviterSession, session,
+                        () => HandleRaidPeerResponseAsync(
+                            session, inviterSession, inviterUid, accepterUid, body));
+                }
+                else if (IsDirectoryCurrent(inviterSession) && IsDirectoryCurrent(session))
+                {
+                    await HandleRaidPeerResponseAsync(
+                        session, inviterSession, inviterUid, accepterUid, body);
+                }
                 return;
             }
 
@@ -1509,11 +1780,9 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            // ★交易 accept(reqType==1)绝不组队。df 交易走独立 CTradeSpace 路径, 与 party join 无关。
-            //   阶段2(开道具放置窗 + 换物)待专项; 此处止血: 交易同意不再误组队。
+            // Trade responses belong exclusively to ItemTradeHandler.
             if (reqType == 1)
             {
-                FileLogger.Log($"[{ProtocolName}] RES_PEER TRADE accept: A={inviterUid} B={accepterUid} → 交易已确认(不组队); ⚠️阶段2放置窗/换物待实现");
                 return;
             }
             var (icid, iaid) = SessionOwnerResolver.Resolve(inviterSession);
@@ -1532,7 +1801,8 @@ namespace DfoServer.Network.Handlers
                     () =>
                     {
                         if (inviterSession.Player?.CurrentRun != null ||
-                            session.Player?.CurrentRun != null)
+                            session.Player?.CurrentRun != null ||
+                            _blacklist.IsBlocked(acid, icid) || _blacklist.IsBlocked(icid, acid))
                         {
                             failureReason = _partyManager.CancelInvite(
                                 accepterUid,
@@ -1543,14 +1813,34 @@ namespace DfoServer.Network.Handlers
                                     : "invite_not_found_or_stale";
                             return;
                         }
-                        join = _partyManager.AcceptInvite(
-                            accepterUid,
-                            session.SessionId,
-                            inviterUid,
-                            inviterSession.SessionId,
-                            inviterMember,
-                            accepterMember,
-                            out joinMode);
+                        var raidHandler = _raidHandler;
+                        if ((raidHandler == null ||
+                            !raidHandler.TryCommitPreparationResponse(
+                                inviterUid, inviterSession.SessionId,
+                                accepterUid, session.SessionId,
+                                group =>
+                                {
+                                    join = _partyManager.AcceptPreparedRaidMember(
+                                        inviterMember, accepterMember, group);
+                                    joinMode = "raid-preparation";
+                                    return join.Ok;
+                                })) && join == null)
+                        {
+                            if (raidHandler == null)
+                            {
+                                join = _partyManager.AcceptInvite(
+                                    accepterUid, session.SessionId,
+                                    inviterUid, inviterSession.SessionId,
+                                    inviterMember, accepterMember, out joinMode);
+                            }
+                            else if (!raidHandler.TryCommitPartyJoin(
+                                inviterMember, accepterMember,
+                                roster => join = _partyManager.AcceptRaidAwareInvite(
+                                    inviterMember, accepterMember, roster, out joinMode)))
+                            {
+                                join = PartyOpResult.Fail("raid_party_join_not_current");
+                            }
+                        }
                         if (!join.Ok)
                         {
                             failureReason = join.Reason;
@@ -1571,7 +1861,12 @@ namespace DfoServer.Network.Handlers
                     $"入队失败 {failureReason}");
                 return;
             }
-            if (join?.Ok == true && join.PriorPartyLeave == null)
+            if (join?.MembershipUnchanged == true && joinMode != "raid-preparation")
+            {
+                await BroadcastPartySettings(party.PartyId);
+                return;
+            }
+            if (join?.Ok == true && !join.MembershipUnchanged && join.PriorPartyLeave == null)
             {
                 var joiningSession = join.TargetUserId == inviterUid
                     ? inviterSession
@@ -2008,6 +2303,18 @@ namespace DfoServer.Network.Handlers
             {
                 _udpRelay?.CloseRoom(partyId);
                 return;
+            }
+
+            if (_raidHandler != null)
+            {
+                var leader = party.GetMember(party.LeaderUserId);
+                if (leader != null)
+                {
+                    await _raidHandler.SynchronizeNormalPartyJoinedAsync(
+                        leader.UserId,
+                        leader.SessionId,
+                        () => _partyManager.GetPartySnapshot(partyId));
+                }
             }
 
             var members = party.MembersBySlot();
