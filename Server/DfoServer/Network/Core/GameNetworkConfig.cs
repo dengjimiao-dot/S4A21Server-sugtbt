@@ -183,11 +183,14 @@ namespace DfoServer.Network
             => listenerGamePort == Channel100GamePort
                || listenerGamePort == Channel100ProxyGamePort;
 
+        // 攻坚身份按频道目录那一行的类型判定, 与 PvP/自由决斗一致:
+        // 未来在 channel_info.etc 里新增攻坚频道时不需要改代码。
         public static bool IsRaidChannel(int channelId)
-            => channelId == RaidChannelIndex;
+            => FindGameChannel(channelId)?.ChannelType == RaidChannelEnvironment;
 
         public static bool IsRaidListener(int listenerGamePort)
-            => listenerGamePort == RaidGamePort;
+            => TryResolveGameChannel(listenerGamePort, out var channel)
+               && channel.ChannelType == RaidChannelEnvironment;
 
         public static byte ResolveLoginEnvironment(int listenerGamePort)
         {
