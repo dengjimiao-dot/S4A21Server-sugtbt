@@ -297,6 +297,8 @@ namespace DfoServer.SelfTests
             }
             await handler.Respond(b.Session, default, PeerBody(a.Session.Player.UserId));
             check("unsolicited acceptance emits nothing", a.Drain().Count == 0 && b.Drain().Count == 0);
+            // Exercise the complete real command path with peers in different areas.
+            b.Session.Player.CurAreaId = 2;
             await protocol.OnPacketReceived_86JP(a.Session, new GamePacketHeader { cmd = 1, type = (ushort)CmdPacketTypeA21.REQUEST_PEER }, PeerBody(b.Session.Player.UserId));
             check("real dispatch emits request ACK and invite separately", a.Drain().Single().SequenceEqual(ItemTradePacketBuilder.PeerAck(CmdPacketTypeA21.REQUEST_PEER))
                 && b.Drain().Single().SequenceEqual(ItemTradePacketBuilder.Invite(a.Session.Player.UserId, 123)));
@@ -345,10 +347,32 @@ namespace DfoServer.SelfTests
                 && left.Inventory.CountMainItem(3030) == 11 && right.Inventory.CountMainItem(3030) == 8);
             await handler.State(b.Session, default, new byte[] { 3 });
             check("wire duplicate confirmation is silent", a.Drain().Count == 0 && b.Drain().Count == 0);
-            b.Session.Player.CurAreaId = 2;
+            check("cross-area settlement kept both original locations", a.Session.Player.CurAreaId == 1 && b.Session.Player.CurAreaId == 2);
+            b.Session.Player.CurTownId = 2;
             await handler.Request(a.Session, default, PeerBody(b.Session.Player.UserId));
-            check("different areas cannot trade", a.Drain().Single()[15] == 0 && b.Drain().Count == 0);
-            b.Session.Player.CurAreaId = 1;
+            check("same-channel different towns can invite", a.Drain().Single()[15] == 1
+                && b.Drain().Single().SequenceEqual(ItemTradePacketBuilder.Invite(a.Session.Player.UserId, 123)));
+            await handler.Respond(b.Session, default, PeerBody(a.Session.Player.UserId));
+            check("same-channel different towns can accept", a.Drain().Single().SequenceEqual(ItemTradePacketBuilder.Accepted(b.Session.Player.UserId, 123, false))
+                && b.Drain().Single().SequenceEqual(ItemTradePacketBuilder.Accepted(a.Session.Player.UserId, 0, true)));
+            await handler.State(a.Session, default, new byte[] { 0 });
+            check("cross-town cancellation refreshes both", a.Drain().First().SequenceEqual(ItemTradePacketBuilder.Closed(false))
+                && b.Drain().First().SequenceEqual(ItemTradePacketBuilder.Closed(false)));
+            using (var otherChannel = await Peer.Create(sessions, 62003, "trade-other-channel", a.Session.ListenerPort + 1))
+            {
+                await handler.Request(a.Session, default, PeerBody(otherChannel.Session.Player.UserId));
+                check("different channels still reject before inviting", a.Drain().Single()[15] == 0 && otherChannel.Drain().Count == 0);
+                await sessions.UnregisterAsync(62003, otherChannel.Session);
+            }
+            b.Session.Player.DungeonSelectionPending = true;
+            await handler.Request(a.Session, default, PeerBody(b.Session.Player.UserId));
+            check("cross-area trade still rejects dungeon selection", a.Drain().Single()[15] == 0 && b.Drain().Count == 0);
+            b.Session.Player.DungeonSelectionPending = false;
+            await handler.Request(a.Session, default, PeerBody(b.Session.Player.UserId)); a.Drain(); b.Drain();
+            await handler.Respond(b.Session, default, PeerBody(a.Session.Player.UserId)); a.Drain(); b.Drain();
+            await handler.CancelBeforeTransition(a.Session, (ushort)CmdPacketTypeA21.SET_USER_AREA);
+            check("active area transition still cancels existing cross-area trade", a.Drain().First().SequenceEqual(ItemTradePacketBuilder.Closed(false))
+                && b.Drain().First().SequenceEqual(ItemTradePacketBuilder.Closed(false)));
             await handler.Request(a.Session, default, PeerBody(b.Session.Player.UserId)); a.Drain(); b.Drain();
             await handler.Respond(b.Session, default, PeerBody(a.Session.Player.UserId)); a.Drain(); b.Drain();
             await handler.CancelBeforeTransition(a.Session, (ushort)CmdPacketTypeA21.ENTER_SELECT_DUNGEON);
