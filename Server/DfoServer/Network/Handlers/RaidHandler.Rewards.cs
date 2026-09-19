@@ -638,10 +638,10 @@ public sealed partial class RaidHandler
 			PhaseRewardFlow value2;
 			if (completed.PhaseIndex == 1)
 			{
-				CancelAllPhaseTwoTimers(raidId);
+				CancelAllPhaseTwoTimers(completed);
 				await EnablePhaseOneDungeonReturnAsync(completed);
 				_phaseRewardFlows.TryRemove(raidId, out value2);
-				CleanupRaidRuntimeState(raidId);
+				CleanupRaidRuntimeState(completed);
 				FileLogger.Log($"[GameProtocol] RAID_PHASE2_COMPLETE raid={raidId} state={completed.State}");
 			}
 			else

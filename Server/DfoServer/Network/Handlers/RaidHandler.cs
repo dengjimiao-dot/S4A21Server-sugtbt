@@ -27,9 +27,15 @@ public sealed partial class RaidHandler
 
 	private readonly RaidManager _raids;
 
+	private readonly ClockService _clock;
+
+	private readonly AntonRaidTimerConfiguration _timerConfiguration;
+
 	private readonly ConcurrentDictionary<Guid, byte> _objectSent = new ConcurrentDictionary<Guid, byte>();
 
-	private readonly ConcurrentDictionary<string, Guid> _timerVersions = new ConcurrentDictionary<string, Guid>();
+	private readonly object _timerRegistrationLock = new object();
+
+	private readonly Dictionary<string, RaidTimerRegistration> _timerRegistrations = new Dictionary<string, RaidTimerRegistration>(StringComparer.Ordinal);
 
 	private readonly ConcurrentDictionary<(uint RaidId, uint SymbolId), uint> _symbolValues = new ConcurrentDictionary<(uint, uint), uint>();
 
@@ -46,10 +52,27 @@ public sealed partial class RaidHandler
 	private readonly ConcurrentDictionary<(uint RaidId, ushort SituationIndex, uint SoloMemberKey, uint DungeonId), uint[]> _raidMonsterRuntimeValues = new ConcurrentDictionary<(uint, ushort, uint, uint), uint[]>();
 
 	public RaidHandler(ICharacterRepository characterRepository, ISessionDirectory sessions, RaidManager raids)
+		: this(
+			characterRepository,
+			sessions,
+			raids,
+			ClockService.Instance,
+			AntonRaidRewardProvider.GetTimerConfiguration())
+	{
+	}
+
+	internal RaidHandler(
+		ICharacterRepository characterRepository,
+		ISessionDirectory sessions,
+		RaidManager raids,
+		ClockService clock,
+		AntonRaidTimerConfiguration timerConfiguration)
 	{
 		_characterRepository = characterRepository ?? throw new ArgumentNullException("characterRepository");
 		_sessions = sessions ?? throw new ArgumentNullException("sessions");
 		_raids = raids ?? throw new ArgumentNullException("raids");
+		_clock = clock ?? throw new ArgumentNullException(nameof(clock));
+		_timerConfiguration = timerConfiguration ?? throw new ArgumentNullException(nameof(timerConfiguration));
 	}
 
 	private static void RunInBackground(Task task, string operation)
@@ -497,13 +520,14 @@ public sealed partial class RaidHandler
 	{
 		if (_raids.TryGetByRaidId(raid.RaidId, out var raid2) && raid2.InstanceId != raid.InstanceId)
 		{
+			CleanupRaidRuntimeState(raid);
 			return;
 		}
 		foreach (RaidMember member in raid.Members)
 		{
 			_objectSent.TryRemove(member.SessionId, out var _);
 		}
-		CleanupRaidRuntimeState(raid.RaidId);
+		CleanupRaidRuntimeState(raid);
 	}
 
 	private Task BroadcastRaidDepartureAsync(RaidSnapshot previousRaid)
