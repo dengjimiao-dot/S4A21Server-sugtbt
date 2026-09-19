@@ -438,12 +438,15 @@ namespace DfoServer.Network.Handlers
             await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x02CB, SortItemLockBuilder.BuildUnlock(notiListType, slotIndex)));
         }
 
+        // 移动后用 0x000E 单槽增量刷新同步 entry 锁标志字节并清除残留锁图标。
+        // 位置锁的保持不依赖本刷新：客户端右键穿戴锁定格物品时会自行解锁该格
+        // 并主动发 0x02CA toggle，服务端盲翻转应答把换入物品翻成锁定。
         private async Task SendMoveSortLockSignals(EnhancedClientSession session, InventoryLease lease, InventoryMoveServiceResult result)
         {
             if (lease == null || result == null || !result.Mutated || result.Changes == null || !result.Changes.HasChanges)
                 return;
 
-            var lockedSlots = new List<SortItemLockEntry>();
+            var refreshedSlots = new List<(InventoryListType ListType, short SlotIndex)>();
             lock (lease.SyncRoot)
             {
                 foreach (var change in result.Changes.Slots)
@@ -451,23 +454,14 @@ namespace DfoServer.Network.Handlers
                     if (!ShouldSendSortLockSignal(change.ListType, change.SlotIndex))
                         continue;
 
-                    var item = lease.Inventory.GetItem(change.ListType, change.SlotIndex);
-                    if (item == null || item.SortLockFlag != 1)
-                        continue;
-
-                    lockedSlots.Add(new SortItemLockEntry
-                    {
-                        ListType = InventoryRefreshSender.MapToSortLockListType(change.ListType),
-                        SlotIndex = change.SlotIndex,
-                        State = 1,
-                    });
+                    refreshedSlots.Add((change.ListType, change.SlotIndex));
                 }
             }
 
-            foreach (var entry in lockedSlots)
+            foreach (var (listType, slotIndex) in refreshedSlots)
             {
-                FileLogger.Log($"[{ProtocolName}] MOVE sort-lock refresh: list={entry.ListType} slot={entry.SlotIndex}");
-                await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(0x01, 0x02CA, SortItemLockBuilder.BuildLock(entry)));
+                FileLogger.Log($"[{ProtocolName}] MOVE sort-lock slot refresh(0x0E): list={listType} slot={slotIndex}");
+                await _refresh.SendSortItemLockSlotRefresh(session, listType, slotIndex);
             }
         }
 
