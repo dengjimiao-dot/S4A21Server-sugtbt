@@ -719,6 +719,39 @@ namespace DfoServer.Game.Quests
             return Task.CompletedTask;
         }
 
+        public Task SyncActorDeathQuestProgressAsync(
+            int dungeonId,
+            int difficulty,
+            int actorCode,
+            byte actorType,
+            int enemyType,
+            Guid sourceEventId = default,
+            IReadOnlyCollection<ushort> eligibleQuestIds = null,
+            DungeonRunIdentity sourceRunIdentity = default,
+            IReadOnlyDictionary<ushort, QuestActivationId>
+                eligibleQuestActivations = null)
+        {
+            var cid = _sender.CharacterId;
+            if (cid <= 0 || dungeonId <= 0 || actorCode <= 0)
+                return Task.CompletedTask;
+
+            var changes = _service.SyncActorDeathQuestProgress(
+                cid,
+                dungeonId,
+                difficulty,
+                actorCode,
+                actorType,
+                enemyType,
+                sourceEventId,
+                eligibleQuestIds,
+                eligibleQuestActivations);
+            TrackServerDrivenTriggerChanges(
+                cid,
+                changes,
+                sourceRunIdentity);
+            return Task.CompletedTask;
+        }
+
         private void TrackServerDrivenTriggerChanges(
             int characterId,
             IReadOnlyList<QuestSetTriggerResult> changes,
