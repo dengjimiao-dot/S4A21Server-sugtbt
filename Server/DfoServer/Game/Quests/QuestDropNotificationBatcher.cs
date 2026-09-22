@@ -17,6 +17,9 @@ namespace DfoServer.Game.Quests
             public EnhancedClientSession Session;
             public int CharacterId;
             public readonly HashSet<short> Slots = new HashSet<short>();
+            public readonly Dictionary<ushort, QuestSetTriggerResult>
+                TriggerChanges =
+                    new Dictionary<ushort, QuestSetTriggerResult>();
             public int Version;
             public ClockService.ClockTimerHandle Timer;
         }
@@ -26,6 +29,7 @@ namespace DfoServer.Game.Quests
             public EnhancedClientSession Session;
             public int CharacterId;
             public short[] Slots;
+            public QuestSetTriggerResult[] TriggerChanges;
         }
 
         private readonly object _sync = new object();
@@ -33,13 +37,19 @@ namespace DfoServer.Game.Quests
             new Dictionary<Guid, PendingRefresh>();
         private readonly Func<EnhancedClientSession, IReadOnlyCollection<short>, Task>
             _sendInventoryRefresh;
+        private readonly Func<EnhancedClientSession,
+            IReadOnlyCollection<QuestSetTriggerResult>, Task>
+            _sendTriggerChanges;
 
         internal QuestDropNotificationBatcher(InventoryRefreshSender inventoryRefresh)
             : this(
                 (session, slots) => inventoryRefresh.SendUpdateItemList(
                     session,
                     InventoryListType.Main,
-                    slots))
+                    slots),
+                (session, changes) => session?.GameSession?.QuestManager
+                    ?.SendTriggerChangesAsync(changes)
+                    ?? Task.CompletedTask)
         {
             if (inventoryRefresh == null)
                 throw new ArgumentNullException(nameof(inventoryRefresh));
@@ -47,15 +57,21 @@ namespace DfoServer.Game.Quests
 
         internal QuestDropNotificationBatcher(
             Func<EnhancedClientSession, IReadOnlyCollection<short>, Task>
-                sendInventoryRefresh)
+                sendInventoryRefresh,
+            Func<EnhancedClientSession,
+                IReadOnlyCollection<QuestSetTriggerResult>, Task>
+                sendTriggerChanges = null)
         {
             _sendInventoryRefresh = sendInventoryRefresh
                 ?? throw new ArgumentNullException(nameof(sendInventoryRefresh));
+            _sendTriggerChanges = sendTriggerChanges
+                ?? ((_, __) => Task.CompletedTask);
         }
 
         internal void Queue(
             EnhancedClientSession session,
-            IEnumerable<short> slots)
+            IEnumerable<short> slots,
+            IEnumerable<QuestSetTriggerResult> triggerChanges = null)
         {
             if (session?.Player == null || session.Player.CharacterId <= 0)
                 return;
@@ -80,6 +96,21 @@ namespace DfoServer.Game.Quests
                     {
                         if (slot >= 0)
                             pending.Slots.Add(slot);
+                    }
+                }
+
+                if (triggerChanges != null)
+                {
+                    foreach (var change in triggerChanges)
+                    {
+                        if (change != null
+                            && change.Success
+                            && change.QuestId > 0
+                            && change.PreviousTriggerValue
+                                != change.TriggerValue)
+                        {
+                            pending.TriggerChanges[change.QuestId] = change;
+                        }
                     }
                 }
 
@@ -155,6 +186,22 @@ namespace DfoServer.Game.Quests
                         $"[GameProtocol] QUEST_DROP inventory refresh failed: {ex.Message}");
                 }
             }
+
+
+            if (snapshot.TriggerChanges.Length > 0)
+            {
+                try
+                {
+                    await _sendTriggerChanges(
+                        session,
+                        snapshot.TriggerChanges);
+                }
+                catch (Exception ex)
+                {
+                    FileLogger.Log(
+                        $"[GameProtocol] QUEST_DROP trigger refresh failed: {ex.Message}");
+                }
+            }
         }
 
         private static RefreshSnapshot CreateSnapshot(PendingRefresh pending)
@@ -163,6 +210,8 @@ namespace DfoServer.Game.Quests
                 Session = pending.Session,
                 CharacterId = pending.CharacterId,
                 Slots = new List<short>(pending.Slots).ToArray(),
+                TriggerChanges = new List<QuestSetTriggerResult>(
+                    pending.TriggerChanges.Values).ToArray(),
             };
 
         private static int NextVersion(int version)

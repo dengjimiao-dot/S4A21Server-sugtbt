@@ -489,6 +489,12 @@ namespace DfoServer.Game.Quests
             await _notifications.SendActiveQuestListAsync(cid);
         }
 
+        internal Task SendTriggerChangesAsync(
+            IEnumerable<QuestSetTriggerResult> changes)
+        {
+            return _notifications.SendTriggerChangesAsync(changes);
+        }
+
         internal async Task SyncItemSeekingQuestProgressAfterInventoryMutationAsync(
             InventoryLease expectedLease,
             InventoryMutationResult mutation)
