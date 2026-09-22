@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Dungeon;
 using DfoServer.Game.Inventory;
+using DfoServer.Game.Quests;
 using DfoServer.Game.Raid;
 using DfoServer.Game.Session;
 using DfoServer.GameWorld;
@@ -27,6 +28,8 @@ public sealed partial class RaidHandler
 
 	private readonly RaidManager _raids;
 
+	private readonly QuestService _questService;
+
 	private readonly ConcurrentDictionary<Guid, byte> _objectSent = new ConcurrentDictionary<Guid, byte>();
 
 	private readonly ConcurrentDictionary<string, Guid> _timerVersions = new ConcurrentDictionary<string, Guid>();
@@ -45,11 +48,16 @@ public sealed partial class RaidHandler
 
 	private readonly ConcurrentDictionary<(uint RaidId, ushort SituationIndex, uint SoloMemberKey, uint DungeonId), uint[]> _raidMonsterRuntimeValues = new ConcurrentDictionary<(uint, ushort, uint, uint), uint[]>();
 
-	public RaidHandler(ICharacterRepository characterRepository, ISessionDirectory sessions, RaidManager raids)
+	public RaidHandler(
+		ICharacterRepository characterRepository,
+		ISessionDirectory sessions,
+		RaidManager raids,
+		QuestService questService = null)
 	{
 		_characterRepository = characterRepository ?? throw new ArgumentNullException("characterRepository");
 		_sessions = sessions ?? throw new ArgumentNullException("sessions");
 		_raids = raids ?? throw new ArgumentNullException("raids");
+		_questService = questService;
 	}
 
 	private static void RunInBackground(Task task, string operation)

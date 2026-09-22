@@ -64,6 +64,9 @@ namespace DfoServer.Game.Quests
                 case QuestProgressOperation.HuntEnemy:
                     return EvaluateHuntEnemy(quest, request, current);
 
+                case QuestProgressOperation.RaidPhaseClear:
+                    return EvaluateRaidPhaseClear(quest, request, current);
+
                 case QuestProgressOperation.ClearMap:
                 case QuestProgressOperation.ClearDungeon:
                 {
@@ -158,6 +161,48 @@ namespace DfoServer.Game.Quests
                 if (!result.Trigger.Equals(previous))
                     result.AddChange(quest.QuestId, previous, result.Trigger);
             }
+            return result;
+        }
+
+        private static QuestProgressEvaluation EvaluateRaidPhaseClear(
+            ActiveQuest quest,
+            QuestProgressApplicationRequest request,
+            QuestTrigger current)
+        {
+            var result = new QuestProgressEvaluation { Trigger = current };
+            if (current.IsComplete
+                || !GameWorld.QuestData.TryGetRaidPhaseClearTargets(
+                    quest.QuestId,
+                    out var targets))
+            {
+                return result;
+            }
+
+            foreach (var target in targets)
+            {
+                if (target.PhaseIndex != request.RaidPhaseIndex)
+                    continue;
+
+                var effective = current;
+                if (request.RepairLegacyRaidPhaseTrigger
+                    && targets.Count == 2
+                    && current.PackedValue == 1)
+                {
+                    effective = new QuestTrigger(
+                        GameWorld.QuestData.GetInitTrigger(quest.QuestId));
+                }
+                if (effective.GetChannel(target.ChannelIndex) <= 0)
+                    return result;
+
+                var next = QuestProgressReducer.DecrementChannel(
+                    effective,
+                    target.ChannelIndex);
+                result.Matched = true;
+                result.Trigger = next;
+                result.AddChange(quest.QuestId, current, next);
+                return result;
+            }
+
             return result;
         }
 
