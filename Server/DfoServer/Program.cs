@@ -20,6 +20,7 @@ namespace DfoServer
             ("--selftest-a21-raid-protocol", SelfTests.A21RaidProtocolSelfTest.Run),
             ("--selftest-raid-persistence", SelfTests.RaidPersistenceSelfTest.Run),
             ("--selftest-packet-framing-bounds", SelfTests.PacketFramingBoundsSelfTest.Run),
+            ("--selftest-packet-capture-runtime", SelfTests.PacketCaptureRuntimeSelfTest.Run),
             ("--selftest-a21-channel-protocol", SelfTests.A21ChannelProtocolSelfTest.Run),
             ("--selftest-a21-user-channel", SelfTests.A21UserChannelSelfTest.Run),
             ("--selftest-a21-create-character-protocol", SelfTests.A21CreateCharacterProtocolSelfTest.Run),
@@ -376,6 +377,7 @@ namespace DfoServer
 
             server.Stop();
             Game.Inventory.InventoryPersistenceService.SaveAllDirty();
+            PacketFileLogger.Shutdown(TimeSpan.FromSeconds(5));
             // 服务停止后不再产生常规业务日志，此时完成队列并等待后台写入结束，避免退出时丢失尾部日志。
             FileLogger.Shutdown(TimeSpan.FromSeconds(5));
             Console.WriteLine("Server stopped.");
