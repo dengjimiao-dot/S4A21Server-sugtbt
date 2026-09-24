@@ -1183,6 +1183,28 @@ namespace DfoServer.Game.Raid
             }
         }
 
+        public bool TryCompletePhase(RaidSnapshot expected, out RaidSnapshot raid)
+        {
+            lock (_lock)
+            {
+                if (expected == null
+                    || !_raids.TryGetValue(expected.RaidId, out var aggregate)
+                    || aggregate.InstanceId != expected.InstanceId
+                    || aggregate.State != 3)
+                {
+                    raid = null;
+                    return false;
+                }
+
+                // State 5 is the between-phase standby UI. The final phase stays
+                // in reward state 4 after its rewards have completed.
+                aggregate.State = aggregate.PhaseIndex == 0 ? 5u : 4u;
+                aggregate.StateArgument = 0;
+                raid = aggregate.Snapshot();
+                return true;
+            }
+        }
+
         public bool TryPrepareNextPhase(ushort leaderUserId, out RaidSnapshot raid, Func<IReadOnlyList<RaidMember>, IReadOnlyList<RaidMember>> resolveOrder = null)
         {
             lock (_lock)

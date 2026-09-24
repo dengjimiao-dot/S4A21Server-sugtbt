@@ -320,7 +320,7 @@ public sealed partial class RaidHandler
 		if (raid.State != 0)
 		{
 			await SendRaidClearCountsAsync(session, raid);
-			await SendRaidBuffStatusAsync(session, raid.RaidId);
+			await SendRaidBuffStatusAsync(session, raid);
 			await SendRaidMonsterStatusAsync(session, raid);
 		}
 	}

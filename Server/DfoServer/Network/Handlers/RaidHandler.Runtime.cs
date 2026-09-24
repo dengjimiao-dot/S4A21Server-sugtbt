@@ -113,7 +113,7 @@ public sealed partial class RaidHandler
 
 	private Task SetSymbolAsync(RaidSnapshot raid, uint symbolId, uint value)
 	{
-		_symbolValues[(raid.RaidId, symbolId)] = value;
+		_symbolValues[(raid.InstanceId, symbolId)] = value;
 		return BroadcastRaidNotificationAsync(raid, NotiPacketTypeA21.RAID_SET_SYMBOL, RaidPacketBuilder.BuildSetSymbol(symbolId, value));
 	}
 
@@ -121,7 +121,7 @@ public sealed partial class RaidHandler
 	{
 		foreach (KeyValuePair<uint, uint> value in values)
 		{
-			_symbolValues[(raid.RaidId, value.Key)] = value.Value;
+			_symbolValues[(raid.InstanceId, value.Key)] = value.Value;
 		}
 		return BroadcastRaidNotificationAsync(raid, NotiPacketTypeA21.RAID_SET_SYMBOL, RaidPacketBuilder.BuildSetSymbols(values));
 	}
@@ -137,6 +137,13 @@ public sealed partial class RaidHandler
 			return current.PhaseIndex == raid.PhaseIndex;
 		}
 		return false;
+	}
+
+	private bool TryGetPhaseRewardFlow(RaidSnapshot raid, out PhaseRewardFlow flow)
+	{
+		flow = null;
+		return raid != null
+			&& _phaseRewardFlows.TryGetValue(raid.InstanceId, out flow);
 	}
 
 	private void StartAttackTimeoutTimer(RaidSnapshot raid, uint remainingSeconds)
@@ -229,6 +236,14 @@ public sealed partial class RaidHandler
 	{
 		ArgumentNullException.ThrowIfNull(expected);
 		ArgumentNullException.ThrowIfNull(callback);
+		if (seconds == 0)
+		{
+			FileLogger.Log(
+				$"[GameProtocol] RAID_TIMER rejected zero duration " +
+				$"raid={expected.RaidId} instance={expected.InstanceId} " +
+				$"phase={expected.PhaseIndex} type={timerType} dungeon={dungeonId} purpose={purpose}");
+			return Guid.Empty;
+		}
 		string key = TimerKey(expected, timerType, dungeonId, purpose);
 		lock (_timerRegistrationLock)
 		{
@@ -358,7 +373,6 @@ public sealed partial class RaidHandler
 	{
 		if (raid == null)
 			return;
-		uint raidId = raid.RaidId;
 		_clock.CancelOneShotsByPrefix($"raid:{raid.InstanceId:N}:");
 		lock (_timerRegistrationLock)
 		{
@@ -370,34 +384,29 @@ public sealed partial class RaidHandler
 				_timerRegistrations.Remove(key);
 			}
 		}
-		// A wire raid id can be reused before delayed cleanup for the old instance runs.
-		// Its timers still need cancellation, but id-scoped state now belongs to the replacement.
-		if (_raids.TryGetByRaidId(raidId, out var replacement)
-			&& replacement.InstanceId != raid.InstanceId)
-			return;
-		_phaseRewardFlows.TryRemove(raidId, out var _);
-		_infectionDungeonByRaid.TryRemove(raidId, out var value2);
-		_blackVolcanoBarrierBroken.TryRemove(raidId, out var _);
-		_raidRuntimeLocks.TryRemove(raidId, out var _);
+		_phaseRewardFlows.TryRemove(raid.InstanceId, out var _);
+		_infectionDungeonByRaid.TryRemove(raid.InstanceId, out var _);
+		_blackVolcanoBarrierBroken.TryRemove(raid.InstanceId, out var _);
+		_raidRuntimeLocks.TryRemove(raid.InstanceId, out var _);
 		foreach (var key in _raidBuffActivations.Keys)
 		{
-			if (key.RaidId == raidId)
+			if (key.RaidInstanceId == raid.InstanceId)
 			{
 				_raidBuffActivations.TryRemove(key, out var _);
 			}
 		}
 		foreach (var key2 in _raidMonsterRuntimeValues.Keys)
 		{
-			if (key2.RaidId == raidId)
+			if (key2.RaidInstanceId == raid.InstanceId)
 			{
 				_raidMonsterRuntimeValues.TryRemove(key2, out var _);
 			}
 		}
 		foreach (var key3 in _symbolValues.Keys)
 		{
-			if (key3.RaidId == raidId)
+			if (key3.RaidInstanceId == raid.InstanceId)
 			{
-				_symbolValues.TryRemove(key3, out value2);
+				_symbolValues.TryRemove(key3, out var _);
 			}
 		}
 	}

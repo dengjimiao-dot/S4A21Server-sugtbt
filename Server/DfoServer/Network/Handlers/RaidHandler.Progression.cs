@@ -372,10 +372,12 @@ public sealed partial class RaidHandler
 	private async Task ClearBlackVolcanoAsync(RaidSnapshot raid)
 	{
 		await Task.Delay(2000);
-		CancelTimer(raid, 3u, 219u);
-		CancelTimer(raid, 4u, 219u);
-		_infectionDungeonByRaid.TryRemove(raid.RaidId, out var _);
-		await SetSymbolsAsync(raid, new KeyValuePair<uint, uint>[2]
+		if (!TryGetCurrentRaid(raid, out var current) || current.State != 2 || current.PhaseIndex != raid.PhaseIndex)
+			return;
+		CancelTimer(current, 3u, 219u);
+		CancelTimer(current, 4u, 219u);
+		_infectionDungeonByRaid.TryRemove(current.InstanceId, out var _);
+		await SetSymbolsAsync(current, new KeyValuePair<uint, uint>[2]
 		{
 			new KeyValuePair<uint, uint>(7u, 0u),
 			new KeyValuePair<uint, uint>(8u, 0u)
@@ -384,9 +386,9 @@ public sealed partial class RaidHandler
 		uint[] array2 = array;
 		foreach (uint dungeonId in array2)
 		{
-			await SetDungeonStateAsync(raid, dungeonId, 2u);
+			await SetDungeonStateAsync(current, dungeonId, 2u);
 		}
-		await SetDungeonStateAsync(raid, 220u, 0u);
+		await SetDungeonStateAsync(current, 220u, 0u);
 		array = AntonRaidRewardProvider.GetHatcheryDungeonIds();
 		array2 = array;
 		foreach (uint hatcheryId in array2)
@@ -395,8 +397,8 @@ public sealed partial class RaidHandler
 			{
 				CancelTimer(raid, num, hatcheryId);
 			}
-			await SetDungeonStateAsync(raid, hatcheryId, 2u);
-			await SetSymbolsAsync(raid, new KeyValuePair<uint, uint>[2]
+			await SetDungeonStateAsync(current, hatcheryId, 2u);
+			await SetSymbolsAsync(current, new KeyValuePair<uint, uint>[2]
 			{
 				new KeyValuePair<uint, uint>(GetAntonHatcheryFailSymbolId(hatcheryId), 0u),
 				new KeyValuePair<uint, uint>(GetAntonHatcheryNamedSymbolId(hatcheryId), 0u)
@@ -410,7 +412,8 @@ public sealed partial class RaidHandler
 		if (clearCount >= 5)
 		{
 			await Task.Delay(2000);
-			await CompletePhaseTwoAsync(raid);
+			if (TryGetCurrentRaid(raid, out var current) && current.State == 2 && current.PhaseIndex == raid.PhaseIndex)
+				await CompletePhaseTwoAsync(current);
 		}
 	}
 
@@ -418,7 +421,7 @@ public sealed partial class RaidHandler
 	{
 		CancelTimer(raid, 1u, dungeonId);
 		CancelTimer(raid, 3u, dungeonId);
-		if (!_infectionDungeonByRaid.TryGetValue(raid.RaidId, out var infectionDungeonId) || infectionDungeonId != dungeonId)
+		if (!_infectionDungeonByRaid.TryGetValue(raid.InstanceId, out var infectionDungeonId) || infectionDungeonId != dungeonId)
 		{
 			await SetDungeonStateAsync(raid, dungeonId, 3u);
 		}
@@ -452,8 +455,8 @@ public sealed partial class RaidHandler
 			ushort[] eligibleUserIds = (from member in result.Members
 				where _raids.HasClearedDungeon(result.RaidId, member.UserId)
 				select member.UserId).ToArray();
-			_phaseRewardFlows[result.RaidId] = new PhaseRewardFlow(eligibleUserIds);
-			await StartPhaseOneResultMovieAsync(result.RaidId);
+			_phaseRewardFlows[result.InstanceId] = new PhaseRewardFlow(eligibleUserIds);
+			await StartPhaseOneResultMovieAsync(result);
 		}
 	}
 
@@ -474,15 +477,15 @@ public sealed partial class RaidHandler
 			remainTimeState: null,
 			async (current, version) =>
 			{
-				bool infectionActive = _infectionDungeonByRaid.ContainsKey(current.RaidId)
-					&& _symbolValues.TryGetValue((current.RaidId, AntonInfectionExistsSymbolId), out var value)
+				bool infectionActive = _infectionDungeonByRaid.ContainsKey(current.InstanceId)
+					&& _symbolValues.TryGetValue((current.InstanceId, AntonInfectionExistsSymbolId), out var value)
 					&& value != 0;
 				await ChangeBlackVolcanoBarrierAsync(
 					current,
 					AntonRaidRewardProvider.GetShieldChargeRate(infectionActive),
 					1,
 					infectionActive ? "infection-recovery" : "normal-recovery");
-				if (_symbolValues.TryGetValue((current.RaidId, AntonBlackVolcanoBarrierSymbolId), out uint barrier)
+				if (_symbolValues.TryGetValue((current.InstanceId, AntonBlackVolcanoBarrierSymbolId), out uint barrier)
 					&& barrier < AntonBlackVolcanoBarrierMaximum
 					&& TimerCurrent(current, 4u, 219u, "barrier-recovery", version))
 				{
@@ -494,10 +497,10 @@ public sealed partial class RaidHandler
 
 	private async Task ChangeBlackVolcanoBarrierAsync(RaidSnapshot raid, uint operand, byte operation, string reason)
 	{
-		(uint, uint) key = (raid.RaidId, 110u);
+		(Guid, uint) key = (raid.InstanceId, 110u);
 		uint previousValue;
 		uint nextValue;
-		lock (_raidRuntimeLocks.GetOrAdd(raid.RaidId, (uint _) => new object()))
+		lock (_raidRuntimeLocks.GetOrAdd(raid.InstanceId, (Guid _) => new object()))
 		{
 			if (!_symbolValues.TryGetValue(key, out previousValue) || !TryApplyRaidSymbolOperation(previousValue, operand, operation, out nextValue))
 			{
@@ -515,7 +518,7 @@ public sealed partial class RaidHandler
 		}
 		if (nextValue == 0 && previousValue != 0)
 		{
-			_blackVolcanoBarrierBroken[raid.RaidId] = 1;
+			_blackVolcanoBarrierBroken[raid.InstanceId] = 1;
 			StartBarrierRecoveryTimer(raid);
 			await SetSymbolsAsync(raid, new KeyValuePair<uint, uint>[4]
 			{
@@ -532,7 +535,7 @@ public sealed partial class RaidHandler
 		}
 		else
 		{
-			_blackVolcanoBarrierBroken[raid.RaidId] = 0;
+			_blackVolcanoBarrierBroken[raid.InstanceId] = 0;
 			await SetSymbolsAsync(raid, new KeyValuePair<uint, uint>[4]
 			{
 				new KeyValuePair<uint, uint>(126u, 0u),
@@ -557,8 +560,8 @@ public sealed partial class RaidHandler
 
 	private async Task SyncBlackVolcanoBarrierStateAsync(EnhancedClientSession session, RaidSnapshot raid)
 	{
-		_symbolValues.TryGetValue((raid.RaidId, 110u), out var barrierValue);
-		bool barrierBroken = _blackVolcanoBarrierBroken.TryGetValue(raid.RaidId, out var value) && value != 0;
+		_symbolValues.TryGetValue((raid.InstanceId, 110u), out var barrierValue);
+		bool barrierBroken = _blackVolcanoBarrierBroken.TryGetValue(raid.InstanceId, out var value) && value != 0;
 		uint activeMovieSymbol = (barrierBroken ? 126u : 127u);
 		uint key = (barrierBroken ? 127u : 126u);
 		byte[] data = GamePacketEnvelopeBuilder.Build(0, (ushort)NotiPacketTypeA21.RAID_SET_SYMBOL, RaidPacketBuilder.BuildSetSymbols(new KeyValuePair<uint, uint>[4]
@@ -591,9 +594,9 @@ public sealed partial class RaidHandler
 				uint infectionDungeonId = SelectAntonInfectionHatchery(
 					openHatcheries,
 					Random.Shared.Next(openHatcheries.Length));
-				_infectionDungeonByRaid[current.RaidId] = infectionDungeonId;
-				_symbolValues[(current.RaidId, AntonInfectionExistsSymbolId)] = 1u;
-				_symbolValues[(current.RaidId, AntonInfectionDungeonIndexSymbolId)] = infectionDungeonId;
+				_infectionDungeonByRaid[current.InstanceId] = infectionDungeonId;
+				_symbolValues[(current.InstanceId, AntonInfectionExistsSymbolId)] = 1u;
+				_symbolValues[(current.InstanceId, AntonInfectionDungeonIndexSymbolId)] = infectionDungeonId;
 				await SetSymbolAsync(current, AntonHatcheryOpenMovieSymbolId, 1u);
 				await BroadcastRaidNotificationAsync(
 					current,
@@ -710,7 +713,7 @@ public sealed partial class RaidHandler
 			{
 				_raids.ResetClearCounts(current.RaidId, new uint[1] { dungeonId });
 				await SetSymbolAsync(current, GetAntonHpSymbolId(dungeonId), 0u);
-				if (!_infectionDungeonByRaid.TryGetValue(current.RaidId, out uint infectionDungeonId)
+				if (!_infectionDungeonByRaid.TryGetValue(current.InstanceId, out uint infectionDungeonId)
 					|| infectionDungeonId != dungeonId)
 				{
 					await SetDungeonStateAsync(current, dungeonId, 0u);
@@ -767,10 +770,15 @@ public sealed partial class RaidHandler
 			ushort[] eligibleUserIds = (from member in waiting.Members
 				where _raids.HasClearedDungeon(waiting.RaidId, member.UserId)
 				select member.UserId).ToArray();
-			_phaseRewardFlows[waiting.RaidId] = new PhaseRewardFlow(eligibleUserIds);
+			_phaseRewardFlows[waiting.InstanceId] = new PhaseRewardFlow(eligibleUserIds);
 			await Task.Delay(2000);
-			await SetSymbolAsync(waiting, 105u, 1u);
-			await StartPhaseOneResultMovieAsync(waiting.RaidId);
+			if (TryGetCurrentRaid(waiting, out var current)
+				&& current.State == waiting.State
+				&& current.PhaseIndex == waiting.PhaseIndex)
+			{
+				await SetSymbolAsync(current, 105u, 1u);
+				await StartPhaseOneResultMovieAsync(current);
+			}
 		}
 	}
 
@@ -863,7 +871,7 @@ public sealed partial class RaidHandler
 			{
 				await BroadcastRaidObjectAsync(started);
 				await BroadcastRaidStateAsync(started);
-				_blackVolcanoBarrierBroken[started.RaidId] = 0;
+				_blackVolcanoBarrierBroken[started.InstanceId] = 0;
 				await SetSymbolsAsync(started, AntonSecondPhaseInitialSymbols);
 				await BroadcastRaidNotificationAsync(started, NotiPacketTypeA21.RAID_DUNGEON_STATE, RaidPacketBuilder.BuildDungeonState(AntonSecondPhaseInitialDungeonStates));
 				await BroadcastRaidSituationAsync(started);

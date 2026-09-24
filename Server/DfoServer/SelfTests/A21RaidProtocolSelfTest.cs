@@ -3697,7 +3697,7 @@ public static class A21RaidProtocolSelfTest
 					nestedType.GetMethod(name).Invoke(obj, null);
 				}
 				object value = typeof(RaidHandler).GetField("_phaseRewardFlows", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(handler);
-				value.GetType().GetMethod("TryAdd").Invoke(value, new object[2] { raid.RaidId, obj });
+				value.GetType().GetMethod("TryAdd").Invoke(value, new object[2] { raid.InstanceId, obj });
 				foreach (RaidWireClient item2 in list.Take(3))
 				{
 					MovieFinished(item2);
@@ -3760,7 +3760,7 @@ public static class A21RaidProtocolSelfTest
 				{
 					continue;
 				}
-				((Task)typeof(RaidHandler).GetMethod("ShowPhaseOneSquadRewardsAsync", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(handler, new object[2] { raid.RaidId, "selftest" })).GetAwaiter().GetResult();
+				((Task)typeof(RaidHandler).GetMethod("ShowPhaseOneSquadRewardsAsync", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(handler, new object[2] { raid, "selftest" })).GetAwaiter().GetResult();
 				byte[][] array8 = (from p in list.SelectMany(Drain)
 					where IsReward(p) && p[15] == 3
 					select p).ToArray();
