@@ -15,8 +15,11 @@ namespace DfoServer.Network.Handlers
         // A21 ITEM_HYPERLINK_MESSAGE：头部与 SEND_MESSAGE 同构（mode:u8 +
         // targetUid:u16 + targetCid:u32 + message:dstr），文本之后到包尾为
         // 装备超链接二进制数据块（tooltip 数据，原样转发，不解析）。
-        // 私聊 mode 1/7 未抓到样本：按 SEND_MESSAGE 同构处理，尾部一律视为
-        // 数据块，不解析 targetName（寻址用 targetUid/targetCid，同 SEND_MESSAGE）。
+        // 私聊 mode 1/7：2026-09-24 packet capture 实机样本（188B）证实 86JP
+        // 在文本后追加 targetName:dstr + 1B 私聊标志（与 SEND_MESSAGE 私聊尾部
+        // 同构，见 .analysis/86JP-ref ChatHandler 注释），其后才是装备数据块
+        // （已观察样本均为 141B，以 01 FF 00 FF FF 开头）。名字与标志必须剥掉，
+        // 不得进入下行数据块。
         public async Task Handle_ITEM_HYPERLINK_MESSAGE(
             EnhancedClientSession session,
             GamePacketHeader header,
@@ -106,8 +109,41 @@ namespace DfoServer.Network.Handlers
             if (Array.IndexOf(messageBytes, (byte)0) >= 0)
                 return false;
 
-            linkBytes = new byte[body.Length - (11 + messageLength)];
-            Buffer.BlockCopy(body, 11 + messageLength, linkBytes, 0, linkBytes.Length);
+            var tailOffset = 11 + messageLength;
+            var targetNameBytes = Array.Empty<byte>();
+            // 私聊 mode 1/7 才解析尾部 targetName:dstr（长度上限 30，与
+            // SEND_MESSAGE TryParseRequest 对齐）。数据块首 4 字节
+            // 01 FF 00 FF 作为 i32 是负数，不可能被误读为名字长度；
+            // 名字不自洽（如旧客户端不带名字）时回退为"文本后全部是数据块"。
+            if (IsDirectMessageMode(mode) && mode != OneToOneConversationMode
+                && body.Length > tailOffset)
+            {
+                var nameLength = BitConverter.ToInt32(body, tailOffset);
+                if (nameLength >= 0 && nameLength <= 30
+                    && body.Length >= tailOffset + 4 + nameLength)
+                {
+                    var afterName = tailOffset + 4 + nameLength;
+                    // 已观察样本中数据块固定以 01 FF 00 FF FF 开头（5 件装备
+                    // 均 141B），私聊标志固定为 0x01。名字后紧跟 01 01 即
+                    // "标志 + 数据块"；01 开头但第 2 字节非 01 即"无标志、
+                    // 直接数据块"。剥完后数据块必须非空且以 0x01 开头。
+                    bool StripName(int newTailOffset)
+                    {
+                        targetNameBytes = new byte[nameLength];
+                        Buffer.BlockCopy(body, tailOffset + 4, targetNameBytes, 0, nameLength);
+                        tailOffset = newTailOffset;
+                        return true;
+                    }
+                    if (body.Length - afterName >= 2
+                        && body[afterName] == 0x01 && body[afterName + 1] == 0x01)
+                        StripName(afterName + 1); // 剥掉 1B 私聊标志
+                    else if (body.Length - afterName >= 1 && body[afterName] == 0x01)
+                        StripName(afterName); // 无标志，名字后直接是数据块
+                }
+            }
+
+            linkBytes = new byte[body.Length - tailOffset];
+            Buffer.BlockCopy(body, tailOffset, linkBytes, 0, linkBytes.Length);
 
             request = new ChatMessageRequest(
                 mode,
@@ -115,7 +151,7 @@ namespace DfoServer.Network.Handlers
                 targetCharacterId,
                 conversationId: 0,
                 messageBytes,
-                targetNameBytes: Array.Empty<byte>());
+                targetNameBytes);
             return true;
         }
 

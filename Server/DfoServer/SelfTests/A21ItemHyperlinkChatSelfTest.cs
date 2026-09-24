@@ -29,6 +29,12 @@ namespace DfoServer.SelfTests
         // mode=0x34（攻坚队，另一角色/装备）样本前缀，尾部全 0 补齐到 169B。
         private const string CapturedRaidHex =
             "34030000000000110000007F7F5BD3CEC1FAD6AEBBEAD5BDC5DB5D7F01FFB400FF70CBF6056EFF836C000021000000000000000080000000";
+        // mode=1（私聊）2026-09-24 packet capture 真实抓包全量 188B：
+        // 头部 + 25B 文本 + targetName DSTR("test65") + 1B 私聊标志 +
+        // 141B 数据块（01 FF 00 FF FF 开头）。
+        private const string CapturedDirectHex =
+            "01060000000000190000007F7F5B5BBBC6BDF0C3CE5DC5E5C2B3CBB9B5C4C8D9D3FE5D7F060000007465737436350101FF00FFFF8C75FA05FEC99A3B0000000000000000C9F499" +
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
 
         public static int Run()
         {
@@ -72,6 +78,24 @@ namespace DfoServer.SelfTests
                 && raidRequest.MessageBytes.SequenceEqual(raidText)
                 && raidBlobOut.SequenceEqual(raidBlob));
 
+            var direct = Convert.FromHexString(CapturedDirectHex);
+            var directText = direct.Skip(11).Take(25).ToArray();
+            var directBlob = direct.Skip(47).ToArray();
+            check("captured mode 1 direct hyperlink parses target name and strips conversation flag",
+                ChatHandler.TryParseHyperlinkRequest(direct, out var directRequest, out var directLink)
+                && directRequest.Mode == 1 && directRequest.TargetUniqueId == 6
+                && directRequest.TargetCharacterId == 0
+                && directRequest.MessageBytes.SequenceEqual(directText)
+                && directRequest.TargetNameBytes.SequenceEqual(ClientTextEncoding.GetBytes("test65"))
+                && directLink.Length == 141 && directLink.SequenceEqual(directBlob)
+                && directLink[0] == 0x01 && directLink[1] == 0xFF);
+            var directMode7 = direct.ToArray(); directMode7[0] = 7;
+            check("mode 7 direct hyperlink parses identically to mode 1",
+                ChatHandler.TryParseHyperlinkRequest(directMode7, out var mode7Request, out var mode7Link)
+                && mode7Request.Mode == 7
+                && mode7Request.TargetNameBytes.SequenceEqual(ClientTextEncoding.GetBytes("test65"))
+                && mode7Link.SequenceEqual(directBlob));
+
             var nulText = area.ToArray(); nulText[11] = 0;
             var zeroLength = area.ToArray(); Array.Clear(zeroLength, 7, 4);
             var oversizeText = area.ToArray(); BitConverter.GetBytes(257).CopyTo(oversizeText, 7);
@@ -82,6 +106,7 @@ namespace DfoServer.SelfTests
                 check("malformed hyperlink request is rejected", !ChatHandler.TryParseHyperlinkRequest(invalid, out _, out _));
 
             await RunAreaTests(check, text, blob);
+            await RunDirectTests(check, text, blob);
             await RunPartyTests(check, text, blob);
             await RunRaidTests(check, text, blob);
             await RunGuildTests(check, text, blob);
@@ -112,6 +137,54 @@ namespace DfoServer.SelfTests
             var emptyTail = b.Drain(); a.Drain();
             check("hyperlink without blob is still routed with empty tail",
                 emptyTail.Count == 1 && IsHyperlinkPacket(emptyTail[0], 3, 101, text, Array.Empty<byte>()));
+        }
+
+        private static async Task RunDirectTests(Action<string, bool> check, byte[] text, byte[] blob)
+        {
+            var sessions = new SessionDirectory();
+            var transitions = new CharacterTransitionCoordinator(sessions);
+            using var a = await Peer.Create(sessions, 101, "甲");
+            using var b = await Peer.Create(sessions, 102, "乙");
+            using var outsider = await Peer.Create(sessions, 103, "丙", 10011);
+            using var chat = new ChatHandler(sessions, new PartyManager(), transitions);
+            var registry = new GameCommandRegistry(); registry.RegisterGroup("chat", chat.RegisterHandlers);
+
+            // 真实抓包形态（name DSTR + 标志 + 数据块），按 targetUid 寻址。
+            await Dispatch(registry, a, DirectBody(1, 102, 0, ClientTextEncoding.GetBytes("test65"), text, blob, withFlag: true));
+            var mine = a.Drain(); var theirs = b.Drain();
+            var expected = GamePacketEnvelopeBuilder.Build(0,
+                (ushort)NotiPacketTypeA21.MESSAGE_HYPER_LINK,
+                ChatHandler.BuildHyperlinkNotificationBody(1, 101, 0, text, blob));
+            check("mode 1 hyperlink strips target name and conversation flag before forwarding",
+                mine.Count == 1 && theirs.Count == 1 && outsider.Drain().Count == 0
+                && theirs[0].SequenceEqual(expected));
+
+            // 名字兜底寻址：targetUid=0 时靠 TargetNameBytes 找到接收方。
+            await Dispatch(registry, a, DirectBody(1, 0, 0, ClientTextEncoding.GetBytes("乙"), text, blob, withFlag: true));
+            check("direct hyperlink falls back to target name addressing",
+                b.Drain().Count == 1 && a.Drain().Count == 1);
+
+            // mode 7 + 无标志形态（旧客户端可能不带私聊标志）。
+            await Dispatch(registry, a, DirectBody(7, 102, 0, ClientTextEncoding.GetBytes("test65"), text, blob, withFlag: false));
+            var mode7 = b.Drain(); a.Drain();
+            check("mode 7 hyperlink without flag forwards pure blob",
+                mode7.Count == 1 && IsHyperlinkPacket(mode7[0], 7, 101, text, blob));
+
+            // 回退：私聊不带名字（旧客户端）——名字长度不自洽，文本后全部视为数据块。
+            await Dispatch(registry, a, HyperlinkBody(1, 102, 0, text, blob));
+            var fallback = b.Drain(); a.Drain();
+            check("direct hyperlink without target name keeps legacy whole-tail blob",
+                fallback.Count == 1 && IsHyperlinkPacket(fallback[0], 1, 101, text, blob));
+        }
+
+        private static byte[] DirectBody(byte mode, ushort targetUid, uint targetCid, byte[] targetName, byte[] text, byte[] blob, bool withFlag)
+        {
+            var w = new GamePacketWriter();
+            w.WriteByte(mode); w.WriteUInt16(targetUid); w.WriteUInt32(targetCid);
+            w.WriteDstr(text); w.WriteDstr(targetName);
+            if (withFlag) w.WriteByte(1);
+            w.WriteBytes(blob);
+            return w.ToArray();
         }
 
         private static async Task RunPartyTests(Action<string, bool> check, byte[] text, byte[] blob)
