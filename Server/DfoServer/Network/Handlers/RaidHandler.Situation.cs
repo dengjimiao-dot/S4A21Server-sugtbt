@@ -72,13 +72,22 @@ public sealed partial class RaidHandler
 		uint extendedRemainingSeconds = 0u;
 		bool flag = string.Equals(definition.TypeName, "INCREASE TIME", StringComparison.OrdinalIgnoreCase) && config.EffectValue > 0;
 		bool flag2 = string.Equals(definition.TypeName, "INCREASE COIN", StringComparison.OrdinalIgnoreCase) && config.EffectValue > 0;
+		uint phaseLimitSeconds = flag
+			? _timerConfiguration.GetPhaseLimitSeconds(raid.PhaseIndex)
+			: 0u;
 		checked
 		{
 			lock (_raidRuntimeLocks.GetOrAdd(raid.RaidId, (uint _) => new object()))
 			{
 				if (!_raidBuffActivations.TryGetValue(key, out var value) || value.CooldownUntilTimestamp <= currentUnixTimestamp)
 				{
-					bool flag3 = !flag || _raids.TryExtendPhaseTime(raid.RaidId, 2400u, (uint)config.EffectValue, out extendedTimeRaid, out extendedRemainingSeconds);
+					bool flag3 = !flag || _raids.TryExtendPhaseTime(
+						raid.RaidId,
+						phaseLimitSeconds,
+						phaseLimitSeconds,
+						(uint)config.EffectValue,
+						out extendedTimeRaid,
+						out extendedRemainingSeconds);
 					if (flag3 & flag2)
 					{
 						flag3 = _raids.TryGrantAdditionalCoinUses(targetUserId, (uint)config.EffectValue, out extendedCoinRaid);
