@@ -109,7 +109,13 @@ namespace DfoServer.Game.Quests
                             && change.PreviousTriggerValue
                                 != change.TriggerValue)
                         {
-                            pending.TriggerChanges[change.QuestId] = change;
+                            if (!pending.TriggerChanges.TryGetValue(
+                                    change.QuestId,
+                                    out var existing)
+                                || IsLaterTriggerChange(existing, change))
+                            {
+                                pending.TriggerChanges[change.QuestId] = change;
+                            }
                         }
                     }
                 }
@@ -188,6 +194,14 @@ namespace DfoServer.Game.Quests
             }
 
 
+            if (session?.Player == null
+                || session.Player.CharacterId != snapshot.CharacterId)
+            {
+                FileLogger.Log(
+                    "[GameProtocol] QUEST_DROP trigger refresh skipped because character changed");
+                return;
+            }
+
             if (snapshot.TriggerChanges.Length > 0)
             {
                 try
@@ -213,6 +227,28 @@ namespace DfoServer.Game.Quests
                 TriggerChanges = new List<QuestSetTriggerResult>(
                     pending.TriggerChanges.Values).ToArray(),
             };
+
+        private static bool IsLaterTriggerChange(
+            QuestSetTriggerResult existing,
+            QuestSetTriggerResult candidate)
+        {
+            if (candidate.PreviousTriggerValue
+                == existing.TriggerValue)
+            {
+                return true;
+            }
+
+            if (existing.PreviousTriggerValue
+                == candidate.TriggerValue)
+            {
+                return false;
+            }
+
+            // Successful CAS updates for one quest form a chain. If the
+            // chain is incomplete, keep the first observed state instead of
+            // allowing an unrelated late notification to regress it.
+            return false;
+        }
 
         private static int NextVersion(int version)
         {

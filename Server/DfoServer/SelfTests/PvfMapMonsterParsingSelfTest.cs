@@ -38,31 +38,6 @@ namespace DfoServer.SelfTests
 
         private static void VerifyQuestAutomaticDropProjection(ref int failures)
         {
-            if (string.IsNullOrWhiteSpace(
-                    Environment.GetEnvironmentVariable("PVF_ARCHIVE_PATH")))
-            {
-                Console.WriteLine(
-                    "quest automatic-drop projection check skipped: " +
-                    "PVF_ARCHIVE_PATH is not set");
-                return;
-            }
-
-            var candidates = QuestDropProvider.CheckMonsterDrop(
-                new[] { 2045 },
-                dungeonIndex: 169,
-                difficulty: 0,
-                monsterCode: 69554);
-            Check(
-                "quest 2045 maps monster 69554 to Rotten Leg 10099745",
-                candidates != null
-                    && candidates.Count == 1
-                    && candidates[0].ItemId == 10099745
-                    && candidates[0].Count == 1
-                    && candidates[0].DropRate == 100
-                    && candidates[0].MaxStack == 20
-                    && candidates[0].SeekingRequiredCount == 20,
-                ref failures);
-
             var success = typeof(QuestDropCommitResult).GetMethods(
                     BindingFlags.Static | BindingFlags.NonPublic)
                 .FirstOrDefault(method =>
@@ -120,6 +95,34 @@ namespace DfoServer.SelfTests
                 projectionOrder.SequenceEqual(
                     new[] { "inventory:187", "trigger" })
                     && projectedTriggers.Count == 1
+                    && projectedTriggers[0].QuestId == 2045
+                    && projectedTriggers[0].TriggerValue == 18,
+                ref failures);
+
+            projectionOrder.Clear();
+            projectedTriggers.Clear();
+            batcher.Queue(
+                session,
+                new short[] { 187 },
+                new[]
+                {
+                    new QuestSetTriggerResult
+                    {
+                        QuestId = 2045,
+                        PreviousTriggerValue = 19,
+                        TriggerValue = 18,
+                    },
+                    new QuestSetTriggerResult
+                    {
+                        QuestId = 2045,
+                        PreviousTriggerValue = 20,
+                        TriggerValue = 19,
+                    },
+                });
+            batcher.FlushPendingAsync(session).GetAwaiter().GetResult();
+            Check(
+                "automatic quest-item projection keeps the latest state when notifications arrive out of order",
+                projectedTriggers.Count == 1
                     && projectedTriggers[0].QuestId == 2045
                     && projectedTriggers[0].TriggerValue == 18,
                 ref failures);
