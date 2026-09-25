@@ -7,6 +7,7 @@ using DfoServer.Network.Handlers.Dungeon;
 using DfoServer.Network.Parsers.Dungeon;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Sockets;
 
 namespace DfoServer.SelfTests
@@ -18,6 +19,7 @@ namespace DfoServer.SelfTests
             Console.WriteLine("=== A21_SPECIAL_DUNGEON_PROTOCOL selftest ===");
             var failures = 0;
 
+            VerifyHuntOnlyBossEntrance(ref failures);
             VerifyTournamentPayloads(ref failures);
             VerifyBloodAltarPayloads(ref failures);
             VerifyBossDieCheckGate(ref failures);
@@ -174,6 +176,85 @@ namespace DfoServer.SelfTests
 
         private static uint ReadUInt32(byte[] data, int offset)
             => BitConverter.ToUInt32(data, offset);
+
+        private static void VerifyHuntOnlyBossEntrance(ref int failures)
+        {
+            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PVF_ARCHIVE_PATH")))
+                return;
+
+            var application = new SpecialDungeonMechanismApplicationService();
+            using var tcpClient = new TcpClient();
+            var session = new EnhancedClientSession(tcpClient, new GamePacketHeader());
+            session.Player.CharacterId = 10041;
+            foreach (short dungeonId in new short[] { 35, 37 })
+            {
+                var dungeon = Dungeon.GetDungeonFile(dungeonId);
+                var expectedCount = dungeonId == 35 ? 4 : 1;
+                for (var mazeIndex = 0; mazeIndex < dungeon.Mazes.Count; mazeIndex++)
+                {
+                    var maze = dungeon.Mazes[mazeIndex];
+                    var run = new DungeonRun(dungeonId, 0)
+                    {
+                        MazeIndex = mazeIndex,
+                        BossMapPos = maze.BossMap,
+                    };
+                    session.Player.CurrentRun = run;
+                    SpecialDungeonRunCoordinator.ConfigureSelection(
+                        run, maze, maze.BossMap, Array.Empty<DfoServer.Game.Quests.ActiveQuest>());
+                    var label = $"dungeon={dungeonId} maze={mazeIndex}";
+                    var targets = run.BossEntranceConditionTargets;
+                    Check($"{label} assigns all hunt-only targets without a summoned boss",
+                        targets.Count == expectedCount
+                        && run.Mechanisms.HasBossEntranceCondition
+                        && !run.HasBossEntranceConditionalSummon, ref failures);
+                    if (targets.Count != expectedCount)
+                        continue;
+
+                    var member = new DungeonRun(run.Instance, run.RunId + 1, 1,
+                        DungeonRunState.Active);
+                    SpecialDungeonRunCoordinator.CloneSelectionState(run, member);
+                    Check($"{label} party selection retains the same target rooms",
+                        member.BossEntranceConditionTargets.Select(t => (t.MonsterCode, t.X, t.Y))
+                            .SequenceEqual(targets.Select(t => (t.MonsterCode, t.X, t.Y))),
+                        ref failures);
+
+                    run.RoomKey = new RoomKey(255, 255, -1);
+                    Check($"{label} a kill outside the assigned room keeps the gate closed",
+                        application.ApplyMonsterKilled(run, targets[0].MonsterCode, 0).Count == 0
+                        && !run.BossEntranceConditionComplete, ref failures);
+
+                    for (var index = 0; index < targets.Count; index++)
+                    {
+                        var target = targets[index];
+                        var room = Dungeon.GetDungeonMapMonsterSummaryInformation(
+                            dungeonId, target.X, target.Y, mazeIndex);
+                        SpecialDungeonRunCoordinator.AppendStartMapActors(session, run, room);
+                        Check($"{label} target {target.MonsterCode} enters START_MAP as a blocking actor",
+                            room.Monsters.Count(m => m.Code == target.MonsterCode
+                                && m.IsBlocking && m.Flag0 == 0) == 1, ref failures);
+
+                        run.RoomKey = new RoomKey(target.X, target.Y, -1);
+                        var effects = application.ApplyMonsterKilled(run, target.MonsterCode, 0);
+                        var finalTarget = index == targets.Count - 1;
+                        Check($"{label} target {index + 1}/{targets.Count} opens the gate only at completion",
+                            target.Completed
+                            && run.BossEntranceConditionComplete == finalTarget
+                            && effects.Count(e => e.Kind == SpecialDungeonEffectKind.PassGate)
+                                == (finalTarget ? 1 : 0), ref failures);
+                        Check($"{label} repeated target death preserves the completed result",
+                            application.ApplyMonsterKilled(run, target.MonsterCode, 0).Count == 0,
+                            ref failures);
+                    }
+                    Check($"{label} hunt-only completion retains ordinary boss handling",
+                        !run.HasBossEntranceConditionalSummon && !run.ConditionalBossSpawned,
+                        ref failures);
+                }
+            }
+            var body = SpecialDungeonNotificationBuilder.BuildCompleteConditionPassGateTrigger();
+            Check("A21 gate condition notification retains the consumed i32 and u8 body",
+                body.Length == 5 && BitConverter.ToInt32(body, 0) == 0 && body[4] == 0,
+                ref failures);
+        }
 
         private static void VerifyBossDieCheckGate(ref int failures)
         {
