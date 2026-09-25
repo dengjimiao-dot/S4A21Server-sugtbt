@@ -80,9 +80,9 @@ namespace DfoServer.Network.Builders
         }
 
         // NOTI 0x0138 / COMPLETE_CONDITION_PASS_GATE.
-        // Client handler 0x00D3A090 consumes i32 + u8. In the current A14
-        // function boundary they are not directly used as gate/map ids; the
-        // visible effect comes from client-local condition and scene containers.
+        // A21 0x01193290 consumes i32 + u8, then sets the dungeon's condition
+        // completion flag through 0x0171C5A0. GateKeeper update 0x01BC6E30
+        // reads that flag through 0x0171C590 and advances its gate state.
         internal static byte[] BuildCompleteConditionPassGateTrigger()
         {
             var writer = new GamePacketWriter();

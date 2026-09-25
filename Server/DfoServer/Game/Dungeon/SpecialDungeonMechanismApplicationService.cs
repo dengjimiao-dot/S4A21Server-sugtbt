@@ -495,7 +495,7 @@ namespace DfoServer.Game.Dungeon
             int monsterCode,
             ICollection<SpecialDungeonEffectIntent> effects)
         {
-            if (!run.Mechanisms.HasBossEntranceConditionalSummon)
+            if (!run.Mechanisms.HasBossEntranceCondition)
                 return;
 
             var matched = false;
