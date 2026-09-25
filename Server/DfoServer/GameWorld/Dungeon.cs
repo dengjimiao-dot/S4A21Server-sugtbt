@@ -105,6 +105,7 @@ namespace DfoServer.GameWorld
             // actor sequences, but can satisfy type-0 destroy-object clear
             // conditions after a story/NPC interaction.
             public IReadOnlyList<int> PassiveObjectCodes { get; set; }
+            internal bool HasElevatorControl { get; set; }
         }
 
         public struct DungeonRoomCoordinate

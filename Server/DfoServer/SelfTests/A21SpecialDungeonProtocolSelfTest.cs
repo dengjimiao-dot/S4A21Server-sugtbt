@@ -21,6 +21,8 @@ namespace DfoServer.SelfTests
             VerifyTournamentPayloads(ref failures);
             VerifyBloodAltarPayloads(ref failures);
             VerifyBossDieCheckGate(ref failures);
+            VerifyElevatorClock(ref failures);
+            VerifyElevatorClearProjection(ref failures);
 
             Console.WriteLine(
                 failures == 0
@@ -277,6 +279,162 @@ namespace DfoServer.SelfTests
                     !reported.ShouldClearDungeon,
                     ref failures);
             }
+        }
+
+        private static void VerifyElevatorClock(ref int failures)
+        {
+            var start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            const long tick = 1000;
+            var elevator = new ElevatorRoomRuntime();
+            Check("elevator waits for loading completion",
+                elevator.Capture(start) == null, ref failures);
+            Check("loading release starts the shared 15 second clock",
+                elevator.TryStart(start, tick, out var ticket, out var deadline)
+                    && deadline == start.AddSeconds(15), ref failures);
+            Check("another participant or reconnect preserves the original clock",
+                !elevator.TryStart(start.AddSeconds(10), tick + 10000, out _, out _),
+                ref failures);
+            Check("running elevator keeps its exits closed",
+                !elevator.AllowsExit(new RoomKey(2, 5, -1), 3, 5), ref failures);
+
+            for (var stage = 1; stage <= 4; stage++)
+            {
+                var previous = ticket;
+                var advanced = elevator.TryAdvance(ticket, start.AddSeconds(stage * 15),
+                    out var state, out ticket, out deadline);
+                var body = SpecialDungeonNotificationBuilder.BuildElevatorState(state);
+                Check($"stage {stage} uses the original two-byte running notification",
+                    advanced && body[0] == stage && body[1] == 0
+                        && (stage == 4 ? !ticket.IsValid : deadline == start.AddSeconds((stage + 1) * 15)),
+                    ref failures);
+                Check($"stage {stage} retires its previous timer ticket",
+                    !elevator.TryAdvance(previous, start.AddMinutes(2), out _, out _, out _),
+                    ref failures);
+            }
+            Check("60 seconds finishes warnings and waits for the actual kill",
+                elevator.Capture(start.AddMinutes(2))?.Stop == ElevatorStopKind.Running,
+                ref failures);
+            elevator.Complete(tick + 60000);
+            var crash = elevator.Capture(start.AddMinutes(2)).Value;
+            Check("a kill at 60 seconds selects crash and the left route",
+                crash.Stage == 4 && crash.Stop == ElevatorStopKind.Crash
+                    && elevator.AllowsExit(new RoomKey(2, 5, -1), 1, 5)
+                    && !elevator.AllowsExit(new RoomKey(2, 5, -1), 3, 5), ref failures);
+            elevator.Complete(tick + 1000);
+            Check("duplicate clear preserves the frozen crash result",
+                elevator.Capture(start)?.Stop == ElevatorStopKind.Crash, ref failures);
+
+            var timely = new ElevatorRoomRuntime();
+            timely.TryStart(start, tick, out var timelyTicket, out _);
+            // Simulate delayed delivery of a kill that actually occurred before 60s.
+            timely.TryAdvance(timelyTicket, start.AddSeconds(61), out _, out _, out _);
+            timely.Complete(tick + 59999);
+            var normal = timely.Capture(start.AddMinutes(2)).Value;
+            Check("canonical kill time decides the boundary even after delayed processing",
+                normal.Stage == 3 && normal.Stop == ElevatorStopKind.Normal
+                    && timely.AllowsExit(new RoomKey(2, 5, -1), 3, 5)
+                    && !timely.AllowsExit(new RoomKey(2, 5, -1), 1, 5), ref failures);
+
+            var early = new ElevatorRoomRuntime();
+            early.TryStart(start, tick, out var earlyTicket, out _);
+            early.Complete(tick + 14000);
+            Check("early clear cancels pending warnings",
+                !early.TryAdvance(earlyTicket, start.AddSeconds(15), out _, out _, out _)
+                    && early.Capture(start)?.Stage == 0, ref failures);
+
+            var resumed = new ElevatorRoomRuntime();
+            resumed.TryStart(start, tick, out var resumeTicket, out _);
+            Check("re-entry derives the current warning stage from the original start",
+                resumed.Capture(start.AddSeconds(38))?.Stage == 2, ref failures);
+            Check("a late callback advances directly to the current stage",
+                resumed.TryAdvance(resumeTicket, start.AddSeconds(47),
+                    out var resumedState, out var nextTicket, out var nextDeadline)
+                    && resumedState.Stage == 3 && nextDeadline == start.AddSeconds(60),
+                ref failures);
+            resumed.Close();
+            Check("closing a room invalidates pending callbacks and restart attempts",
+                !resumed.TryAdvance(nextTicket, start.AddSeconds(60), out _, out _, out _)
+                    && !resumed.TryStart(start, tick, out _, out _)
+                    && resumed.Capture(start) == null, ref failures);
+        }
+
+        private static void VerifyElevatorClearProjection(ref int failures)
+        {
+            if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("PVF_ARCHIVE_PATH")))
+                return;
+
+            var maze = Dungeon.GetDungeonMapMonsterSummaryInformation(53, 2, 5, 0);
+            var run = new DungeonRun(53, 0) { RoomKey = new RoomKey(2, 5, -1) };
+            var shared = run.Instance.GetOrCreateRoom(run.RoomKey,
+                id => new DungeonInstanceRoom(id, run.RoomKey, maze, 1), out _);
+            run.SetCurrentRoom(shared);
+            var room = new RoomState { Maze = maze, InstanceRoom = shared };
+            run.RoomStates.Add(run.RoomKey, room);
+            room.TryActivate();
+            var application = new SpecialDungeonMechanismApplicationService();
+            Check("active elevator waits for the room clear fact",
+                application.BuildRoomClearState(room).Count == 0, ref failures);
+            var start = DateTime.UtcNow;
+            var tick = Environment.TickCount64;
+            shared.Elevator.TryStart(start, tick, out _, out _);
+            var source = new DungeonEventEnvelope(Guid.NewGuid(), run.CaptureIdentity(),
+                shared.RoomInstanceId, 1, 1, 1, maze.Monsters[0].Code,
+                "elevator clear test", tick + 61000);
+            ushort lastSequence = 0;
+            foreach (var actor in maze.Monsters)
+            {
+                lastSequence++;
+                shared.TryRecordActorDeath(source, lastSequence, actor.Code, actor.Type);
+            }
+            var committed = shared.TryCommitClearFromActorDeaths(
+                actor => actor.IsBlocking, source, lastSequence);
+            room.TryClear();
+            var effects = application.BuildRoomClearState(room);
+            Check("canonical room clear freezes the PVF elevator outcome",
+                committed.IsCleared && effects.Count == 1
+                    && effects[0].Kind == SpecialDungeonEffectKind.ElevatorState
+                    && effects[0].MapId == 16408
+                    && effects[0].Elevator.Stop == ElevatorStopKind.Crash,
+                ref failures);
+
+            using var tcpClient = new TcpClient();
+            var session = new EnhancedClientSession(tcpClient, new GamePacketHeader());
+            byte[] packet = null;
+            new SpecialDungeonNotificationSender().SendAsync(session, effects[0], data =>
+            {
+                packet = data;
+                return System.Threading.Tasks.Task.FromResult(true);
+            }).GetAwaiter().GetResult();
+            Check("elevator notification matches the A21 two-byte terminal-state consumer",
+                packet.Length == 17 && packet[0] == 0
+                    && ReadUInt16(packet, 1) == (ushort)NotiPacketTypeA21.ELEVATOR_CLEAR_TIME_CHECK
+                    && packet[15] == 4 && packet[16] == 2,
+                ref failures);
+
+            Check("revisiting a cleared elevator preserves the original crash route",
+                application.BuildStartMapState(run)[0].Elevator.Stop == ElevatorStopKind.Crash,
+                ref failures);
+            var sameRoom = run.Instance.GetOrCreateRoom(run.RoomKey,
+                _ => throw new InvalidOperationException("room must be shared"), out var created);
+            Check("party participants share one elevator runtime",
+                !created && ReferenceEquals(sameRoom.Elevator, shared.Elevator), ref failures);
+            run.Instance.TryBeginEnding();
+            Check("instance end closes the elevator state",
+                shared.Elevator.Capture(start) == null, ref failures);
+
+            var ordinary = new RoomState
+            {
+                Maze = new Dungeon.MazeSumInfo { PassiveObjectCodes = new[] { 1111, 826 } },
+            };
+            ordinary.TryActivate();
+            ordinary.TryClear();
+            Check("cleared rooms with other passive objects keep their ordinary projection",
+                application.BuildRoomClearState(ordinary).Count == 0, ref failures);
+            var ordinaryMaze = maze;
+            ordinaryMaze.HasElevatorControl = false;
+            Check("ordinary room templates create no elevator runtime",
+                new DungeonInstanceRoom(1, run.RoomKey, ordinaryMaze, 1).Elevator == null,
+                ref failures);
         }
 
         private static void Check(string name, bool condition, ref int failures)
