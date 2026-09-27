@@ -912,6 +912,10 @@ INSERT INTO character_subtype1_fields(character_id) VALUES (@cid);";
                     && pickupAck.Length >= 16
                     && pickupAck[15] == 1
                     && pickupNotiIndex >= 0
+                    && packets[pickupNotiIndex].Length >= 15 + 10
+                    && ReadUInt16(packets[pickupNotiIndex], 15) == goldSceneSlot
+                    && ReadUInt16(packets[pickupNotiIndex], 17) == 3033
+                    && ReadInt32(packets[pickupNotiIndex], 15 + 6) == goldAmount
                     && goldRefresh != null
                     && goldRefreshIndex > pickupNotiIndex
                     && goldRefresh.Length >= 15 + 3 + 10
@@ -923,6 +927,46 @@ INSERT INTO character_subtype1_fields(character_id) VALUES (@cid);";
                     && lease.Inventory.GetMainVirtualCount(
                         InventoryService.MainVirtualCurrencySlotStart)?.Count
                         == goldAmount,
+                    ref failures);
+
+                // 同一 handler 链，拾取者在队伍槽位 1：0x0027 的 gold 必须写到
+                // entry1（包内偏移 6+14），且 entry0 的 gold 清零（模板自带 8）。
+                const ushort secondSceneSlot = 10;
+                const int secondGold = 777;
+                run.EntryPartySlotIndex = 1;
+                run.Drops[secondSceneSlot] = DropInfo.CreateGold(
+                    secondSceneSlot,
+                    secondGold);
+
+                dungeon.Handle_ENUM_CMDPACKET_GET_ITEM(
+                        session,
+                        new GamePacketHeader(),
+                        BitConverter.GetBytes(secondSceneSlot))
+                    .GetAwaiter()
+                    .GetResult();
+
+                packets = capture.ReadPackets(minimumCount: 2);
+                var partyNoti = packets.LastOrDefault(packet => IsPacket(
+                    packet,
+                    0x00,
+                    (ushort)NotiPacketTypeA21.GET_ITEM));
+                var partyRefresh = packets.LastOrDefault(packet => IsPacket(
+                    packet,
+                    0x00,
+                    (ushort)NotiPacketTypeA21.UPDATE_ITEM_LIST));
+                Check(
+                    "party-slot gold pickup projects 0x0027 gold into the picker's entry and zeroes seat 0",
+                    partyNoti != null
+                    && partyNoti.Length >= 15 + 24
+                    && ReadUInt16(partyNoti, 15) == secondSceneSlot
+                    && ReadUInt16(partyNoti, 17) == 3033
+                    && ReadInt32(partyNoti, 15 + 6) == 0
+                    && ReadInt32(partyNoti, 15 + 20) == secondGold
+                    && partyRefresh != null
+                    && ReadInt32(partyRefresh, 24) == goldAmount + secondGold
+                    && lease.Inventory.GetMainVirtualCount(
+                        InventoryService.MainVirtualCurrencySlotStart)?.Count
+                        == goldAmount + secondGold,
                     ref failures);
             }
             catch (Exception ex)
