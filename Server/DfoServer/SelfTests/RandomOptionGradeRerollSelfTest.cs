@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using DfoServer.Game.Inventory;
+using DfoServer.Network.Handlers;
 
 namespace DfoServer.SelfTests
 {
@@ -33,6 +34,8 @@ namespace DfoServer.SelfTests
                 VerifySkipListsKeepOriginalValues(ref failures);
                 VerifyWeightedBandDistribution(ref failures);
                 VerifyResetWithoutSealOptionsKeepsLegacyBehavior(ref failures);
+                VerifyResetRandomOptionWireParse(ref failures);
+                VerifyResetRandomOptionBusinessPath(ref failures);
             }
 
             Console.WriteLine(failures == 0
@@ -208,6 +211,71 @@ namespace DfoServer.SelfTests
                     && updated.Value == result.NewQualitySeed
                     && updated.RandomOptions.Count == 0
                     && (material == null || material.Count == 0),
+                ref failures);
+        }
+
+        // CMD 0x01C8 RESET_RANDOM_OPTION(魔法封印装备品级调整)抓包样本与业务路径。
+        // 2026-09-28 22:43:09 线上 server.log: Unhandled CMD type=0x01C8 body(6B): 0B-00-42-00-00-00
+        private static void VerifyResetRandomOptionWireParse(ref int failures)
+        {
+            var sample = new byte[] { 0x0B, 0x00, 0x42, 0x00, 0x00, 0x00 };
+            Check(
+                "RESET_RANDOM_OPTION 抓包样本 0B-00-42-00-00-00 解析 targetSlot=11 materialSlot=66",
+                InventoryHandler.TryParseResetRandomOptionBody(sample, out var targetSlot, out var materialSlot)
+                    && targetSlot == 11
+                    && materialSlot == 66,
+                ref failures);
+
+            Check(
+                "RESET_RANDOM_OPTION 非法 body(null / 不足 4B) 拒绝",
+                !InventoryHandler.TryParseResetRandomOptionBody(null, out _, out _)
+                    && !InventoryHandler.TryParseResetRandomOptionBody(new byte[] { 0x0B, 0x00, 0x42 }, out _, out _),
+                ref failures);
+        }
+
+        private static void VerifyResetRandomOptionBusinessPath(ref int failures)
+        {
+            var inventory = new InventoryService(92031, 92032);
+            inventory.SetItem(
+                InventoryListType.Main,
+                11,
+                CreateEquipmentCore(
+                    new RandomOption { Type = FireAttackOptionId, Value1 = 5, Value2 = 11 }));
+            inventory.SetItem(InventoryListType.Main, 66, CreateKaleidoBoxCore(2));
+
+            var captured = new byte[] { 0x0B, 0x00, 0x42, 0x00, 0x00, 0x00 };
+            Check(
+                "RESET_RANDOM_OPTION 按抓包样本构造请求: itemId 取目标槽实际装备",
+                InventoryHandler.TryBuildResetRandomOptionRequest(inventory, captured, out var request)
+                    && request.TargetSlotIndex == 11
+                    && request.TargetItemTemplateId == RareWaistItemId
+                    && request.MaterialSlotIndex == 66,
+                ref failures);
+
+            ResetItemQualityResult result = null;
+            var ok = request != null
+                && InventoryEquipmentMutationService.TryResetItemQuality(inventory, request, out result);
+            var options = inventory.GetItem(InventoryListType.Main, 11)?.RandomOptions;
+            Check(
+                "RESET_RANDOM_OPTION 业务路径成功且封印数值重随(159@65 区间 [2,11]), 材料槽 66 消耗 1",
+                ok
+                    && result != null
+                    && result.ErrorCode == 0
+                    && options != null
+                    && options.Count == 1
+                    && options[0].Type == FireAttackOptionId
+                    && options[0].Value1 >= 2
+                    && options[0].Value1 <= 11
+                    && options[0].Value2 == 11
+                    && inventory.GetItem(InventoryListType.Main, 66)?.Count == 1,
+                ref failures);
+
+            Check(
+                "RESET_RANDOM_OPTION 目标槽为空时构造请求失败(回失败 ACK)",
+                !InventoryHandler.TryBuildResetRandomOptionRequest(
+                    new InventoryService(92041, 92042),
+                    captured,
+                    out _),
                 ref failures);
         }
 
