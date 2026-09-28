@@ -64,6 +64,8 @@ namespace DfoServer
             ("--selftest-stacked-orb-conversion", SelfTests.StackedOrbConversionSelfTest.Run),
             ("--selftest-quest-completion-ticket", SelfTests.QuestCompletionTicketSelfTest.Run),
             ("--selftest-quest-progress-batch", SelfTests.QuestProgressBatchSelfTest.Run),
+            ("--selftest-quest-chain-availability", SelfTests.QuestChainAvailabilitySelfTest.Run),
+            ("--selftest-quest-question-branch", SelfTests.QuestQuestionBranchSelfTest.Run),
             ("--selftest-level-up-ticket", SelfTests.LevelUpTicketSelfTest.Run),
             ("--selftest-growup-change", SelfTests.GrowupChangeSelfTest.Run),
             ("--selftest-cargo-transport-stone", SelfTests.CargoTransportStoneSelfTest.Run),

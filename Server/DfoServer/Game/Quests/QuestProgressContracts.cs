@@ -21,6 +21,7 @@ namespace DfoServer.Game.Quests
         internal ushort QuestId { get; set; }
         internal byte TriggerType { get; set; }
         internal bool Increment { get; set; }
+        internal byte? QuestionAnswerIndex { get; set; }
         internal int DungeonId { get; set; }
         internal int Difficulty { get; set; }
         internal int MapId { get; set; }
