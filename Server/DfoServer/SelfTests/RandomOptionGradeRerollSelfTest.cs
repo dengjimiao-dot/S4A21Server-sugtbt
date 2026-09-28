@@ -67,7 +67,8 @@ namespace DfoServer.SelfTests
 
             var updated = inventory.GetItem(InventoryListType.Main, 10);
             var options = updated != null ? updated.RandomOptions : null;
-            // 65级 PvE 行: 159_fireattack `2 11`, 70_physicalattack `9 61`
+            // 65级 PvE 行: 159_fireattack `2 11`, 70_physicalattack `9 61`。
+            // Value2=品级百分比 p(稀有2档位覆盖 [0,56]), Value1=区间按 p 插值。
             Check(
                 "品级调整箱成功后装备品级种子重 roll、材料消耗 1 个、封印条数/类型/顺序不变",
                 ok
@@ -85,15 +86,13 @@ namespace DfoServer.SelfTests
                 ref failures);
 
             Check(
-                "封印数值重 roll 后落在官方区间且 Value2 恒为行 max",
+                "封印数值重 roll: Value2=p∈[0,56] 且 Value1 为官方区间按 p 插值",
                 options != null
                     && options.Count == 2
-                    && options[0].Value1 >= 2
-                    && options[0].Value1 <= 11
-                    && options[0].Value2 == 11
-                    && options[1].Value1 >= 9
-                    && options[1].Value1 <= 61
-                    && options[1].Value2 == 61,
+                    && options[0].Value2 <= 56
+                    && MatchesInterpolatedValue(options[0], 2, 11)
+                    && options[1].Value2 <= 56
+                    && MatchesInterpolatedValue(options[1], 9, 61),
                 ref failures);
         }
 
@@ -121,7 +120,7 @@ namespace DfoServer.SelfTests
 
             var options = inventory.GetItem(InventoryListType.Main, 10)?.RandomOptions;
             Check(
-                "unable/gradeless 名单内属性保持原值, 名单外属性正常重 roll",
+                "unable/gradeless 名单内属性保持原值, 名单外属性正常重 roll(Value2=p, Value1 按 p 插值)",
                 ok
                     && result != null
                     && result.ErrorCode == 0
@@ -134,9 +133,8 @@ namespace DfoServer.SelfTests
                     && options[1].Value1 == 20
                     && options[1].Value2 == 39
                     && options[2].Type == PhysicalAttackOptionId
-                    && options[2].Value1 >= 9
-                    && options[2].Value1 <= 61
-                    && options[2].Value2 == 61,
+                    && options[2].Value2 <= 56
+                    && MatchesInterpolatedValue(options[2], 9, 61),
                 ref failures);
         }
 
@@ -152,7 +150,7 @@ namespace DfoServer.SelfTests
             }
 
             // 稀有(2)档位: [0,14] w330 / [14,37] w520 / [37,47] w100 / [47,56] w50。
-            // 159 @65 官方区间 [2,11]: 低档(p<=14) 只产出 v1<=3, 高档(p>=47) 只产出 v1>=6。
+            // 159 @65 官方区间 [2,11], Value2=p 直接可见: 低档(p<14) 应显著多于高档(p>=47)。
             var values = new List<int>(DistributionRollCount);
             var allRerolled = true;
             for (var i = 0; i < DistributionRollCount; i++)
@@ -167,16 +165,19 @@ namespace DfoServer.SelfTests
                     continue;
                 }
 
-                values.Add(entry.Value1);
+                if (!MatchesInterpolatedValue(entry, 2, 11))
+                    allRerolled = false;
+
+                values.Add(entry.Value2);
             }
 
-            var lowBandCount = values.Count(v => v <= 3);
-            var highBandCount = values.Count(v => v >= 6);
+            var lowBandCount = values.Count(p => p < 14);
+            var highBandCount = values.Count(p => p >= 47);
             Check(
-                $"重复调整 {DistributionRollCount} 次全部成功, 数值不全相同, 高档位(47~56 档)频率显著低于低档位(0~14 档)",
+                $"重复调整 {DistributionRollCount} 次全部成功且数值一致, p∈[0,56] 不全相同, 高档位(47~56 档)频率显著低于低档位(0~14 档)",
                 allRerolled
                     && values.Count == DistributionRollCount
-                    && values.All(v => v >= 2 && v <= 11)
+                    && values.All(p => p <= 56)
                     && values.Distinct().Count() > 1
                     && highBandCount < lowBandCount,
                 ref failures);
@@ -257,16 +258,15 @@ namespace DfoServer.SelfTests
                 && InventoryEquipmentMutationService.TryResetItemQuality(inventory, request, out result);
             var options = inventory.GetItem(InventoryListType.Main, 11)?.RandomOptions;
             Check(
-                "RESET_RANDOM_OPTION 业务路径成功且封印数值重随(159@65 区间 [2,11]), 材料槽 66 消耗 1",
+                "RESET_RANDOM_OPTION 业务路径成功且封印数值重随(Value2=p∈[0,56], 159@65 按 p 插值), 材料槽 66 消耗 1",
                 ok
                     && result != null
                     && result.ErrorCode == 0
                     && options != null
                     && options.Count == 1
                     && options[0].Type == FireAttackOptionId
-                    && options[0].Value1 >= 2
-                    && options[0].Value1 <= 11
-                    && options[0].Value2 == 11
+                    && options[0].Value2 <= 56
+                    && MatchesInterpolatedValue(options[0], 2, 11)
                     && inventory.GetItem(InventoryListType.Main, 66)?.Count == 1,
                 ref failures);
 
@@ -277,6 +277,23 @@ namespace DfoServer.SelfTests
                     captured,
                     out _),
                 ref failures);
+        }
+
+        // Value1 必须是官方(截断后)区间按 Value2(品级百分比 p) 线性插值的结果,
+        // 与实现同用整数除法, 期望精确相等。
+        private static bool MatchesInterpolatedValue(RandomOption option, int minEff, int maxEff)
+        {
+            return MatchesInterpolatedValue(option.Value1, option.Value2, minEff, maxEff);
+        }
+
+        private static bool MatchesInterpolatedValue(RandomOptionEntry entry, int minEff, int maxEff)
+        {
+            return MatchesInterpolatedValue(entry.Value1, entry.Value2, minEff, maxEff);
+        }
+
+        private static bool MatchesInterpolatedValue(byte value1, byte value2, int minEff, int maxEff)
+        {
+            return value1 == minEff + (maxEff - minEff) * value2 / 100;
         }
 
         private static ItemCore CreateEquipmentCore(params RandomOption[] options)

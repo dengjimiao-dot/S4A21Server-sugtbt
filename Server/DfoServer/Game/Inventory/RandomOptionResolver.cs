@@ -32,6 +32,9 @@ namespace DfoServer.Game.Inventory
         private static readonly Lazy<Dictionary<int, List<GradeModificationBand>>> GradeModificationBands =
             new Lazy<Dictionary<int, List<GradeModificationBand>>>(LoadGradeModificationBands);
 
+        private static readonly Lazy<Dictionary<int, List<DifferentWeightEntry>>> DifferentWeights =
+            new Lazy<Dictionary<int, List<DifferentWeightEntry>>>(LoadDifferentWeights);
+
         private static readonly Lazy<HashSet<int>> UnableToModifyPostfixGrades =
             new Lazy<HashSet<int>>(() => new HashSet<int>(ReadSectionInts(
                 PvfArchiveAccessor.ReadText("etc/randomoption/randomizedoptionoverall2.etc"),
@@ -68,7 +71,7 @@ namespace DfoServer.Game.Inventory
                     if (!usedOptionIds.Add(optionId))
                         continue;
 
-                    picked.Add(RollOptionValue(optionId, metadata.MinimumLevel));
+                    picked.Add(RollOptionValue(optionId, metadata.MinimumLevel, metadata.Rarity, picked.Count + 1));
                     break;
                 }
             }
@@ -115,7 +118,7 @@ namespace DfoServer.Game.Inventory
                 if (usedOptionIds.Contains(optionId))
                     continue;
 
-                entry = RollOptionValue(optionId, metadata.MinimumLevel);
+                entry = RollOptionValue(optionId, metadata.MinimumLevel, metadata.Rarity, safeIndex + 1);
                 return true;
             }
 
@@ -124,11 +127,11 @@ namespace DfoServer.Game.Inventory
                 if (usedOptionIds.Contains(candidate.OptionId))
                     continue;
 
-                entry = RollOptionValue(candidate.OptionId, metadata.MinimumLevel);
+                entry = RollOptionValue(candidate.OptionId, metadata.MinimumLevel, metadata.Rarity, safeIndex + 1);
                 return true;
             }
 
-            entry = RollOptionValue(RollWeighted(weightedOptions).OptionId, metadata.MinimumLevel);
+            entry = RollOptionValue(RollWeighted(weightedOptions).OptionId, metadata.MinimumLevel, metadata.Rarity, safeIndex + 1);
             return true;
         }
 
@@ -315,35 +318,47 @@ namespace DfoServer.Game.Inventory
             return Math.Max(1, Math.Min(3, RollWeighted(weights).Quantity));
         }
 
-        // internal: SelfTest 需要按 (optionId, itemLevel) 定点验证 roll 行为。
-        internal static RandomOptionEntry RollOptionValue(int optionId, int itemLevel)
+        // 解封/变换词条: Value2 的语义是品级百分比 p(客户端按 [choose postfix] 阈值表直接查
+        // 字母 C/B/A/S), 不是数值上限; p 按 [different weight] 表按 (稀有度, 槽位) roll,
+        // Value1 = 官方 PvE 区间按 p 线性插值。internal: SelfTest 需要定点验证 roll 行为。
+        internal static RandomOptionEntry RollOptionValue(int optionId, int itemLevel, int rarity, int slotIndex)
         {
             if (!OptionFiles.Value.TryGetValue(optionId, out var relativePath))
-                return new RandomOptionEntry { Type = ClampByte(optionId), Value1 = 1, Value2 = 1 };
+                return new RandomOptionEntry { Type = ClampByte(optionId), Value1 = 1, Value2 = 0 };
 
             try
             {
                 var text = PvfArchiveAccessor.ReadText("etc/randomoption/" + relativePath);
                 var values = ResolveLevelValues(text, itemLevel);
+                var (minEff, maxEff) = ClampRangeToByteDomain(values.value1, values.value2);
+                var p = RollGradePercent(rarity, slotIndex);
+                var value = minEff + (maxEff - minEff) * p / 100;
+                value = Math.Max(minEff, Math.Min(value, maxEff));
                 return new RandomOptionEntry
                 {
                     Type = ClampByte(optionId),
-                    Value1 = ClampByte(RollOptionValueInRange(values.value1, values.value2)),
-                    Value2 = ClampByte(values.value2),
+                    Value1 = ClampByte(value),
+                    Value2 = ClampByte(p),
                 };
             }
             catch (Exception ex)
             {
                 FileLogger.Log($"[RandomOption] option=0x{optionId:X2} load failed: {ex.Message}");
-                return new RandomOptionEntry { Type = ClampByte(optionId), Value1 = 1, Value2 = 1 };
+                return new RandomOptionEntry { Type = ClampByte(optionId), Value1 = 1, Value2 = 0 };
             }
         }
 
-        // 在截断到字节域后的官方区间内均匀 roll, 避免先 roll 再 clamp 在 255 处形成概率尖峰。
-        private static int RollOptionValueInRange(int minValue, int maxValue)
+        // 按 [different weight] 表 roll 品级百分比 p(槽位从 1 开始, clamp 到表内最大槽位);
+        // 稀有度/槽位无条目时回退均匀 [0,56]。
+        private static int RollGradePercent(int rarity, int slotIndex)
         {
-            var (minEff, maxEff) = ClampRangeToByteDomain(minValue, maxValue);
-            return Random.Shared.Next(minEff, maxEff + 1);
+            if (DifferentWeights.Value.TryGetValue(rarity, out var slots) && slots.Count > 0)
+            {
+                var slot = slots[Math.Max(1, Math.Min(slotIndex, slots.Count)) - 1];
+                return Random.Shared.Next(slot.PctMin, slot.PctMax + 1);
+            }
+
+            return Random.Shared.Next(0, 57);
         }
 
         // 品级调整箱规则: 按 [postfix grade modification] 权重选档, 档内均匀取百分比 p,
@@ -379,7 +394,7 @@ namespace DfoServer.Game.Inventory
                 {
                     Type = ClampByte(optionId),
                     Value1 = ClampByte(value),
-                    Value2 = ClampByte(values.value2),
+                    Value2 = ClampByte(p),
                 };
                 return true;
             }
@@ -580,6 +595,36 @@ namespace DfoServer.Game.Inventory
             return result;
         }
 
+        // [different weight] 每 4 个 int 一组: (稀有度, 槽位(从1开始), 百分比下限, 百分比上限),
+        // 解封时按 (稀有度, 槽位)  roll 品级百分比 p。连续数字按 4 个一组切分, 跳过不完整组。
+        private static Dictionary<int, List<DifferentWeightEntry>> LoadDifferentWeights()
+        {
+            var text = PvfArchiveAccessor.ReadText("etc/randomoption/randomizedoptionoverall2.etc");
+            var ints = ReadSectionInts(text, "different weight");
+            var result = new Dictionary<int, List<DifferentWeightEntry>>();
+            for (var i = 0; i + 3 < ints.Count; i += 4)
+            {
+                var rarity = ints[i];
+                if (rarity <= 0)
+                    continue;
+
+                if (!result.TryGetValue(rarity, out var slots))
+                {
+                    slots = new List<DifferentWeightEntry>();
+                    result[rarity] = slots;
+                }
+
+                slots.Add(new DifferentWeightEntry
+                {
+                    Slot = ints[i + 1],
+                    PctMin = ints[i + 2],
+                    PctMax = ints[i + 3],
+                });
+            }
+
+            return result;
+        }
+
         private static string ReadSectionText(string text, string sectionName)
         {
             var match = Regex.Match(text ?? string.Empty, @"\[" + Regex.Escape(sectionName) + @"\]\s*(.*?)\[/" + Regex.Escape(sectionName) + @"\]", RegexOptions.Singleline | RegexOptions.IgnoreCase);
@@ -718,6 +763,15 @@ namespace DfoServer.Game.Inventory
             public int PctMax { get; set; }
 
             public int Weight { get; set; }
+        }
+
+        private sealed class DifferentWeightEntry
+        {
+            public int Slot { get; set; }
+
+            public int PctMin { get; set; }
+
+            public int PctMax { get; set; }
         }
     }
 }
