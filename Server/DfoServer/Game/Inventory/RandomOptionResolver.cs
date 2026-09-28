@@ -302,7 +302,8 @@ namespace DfoServer.Game.Inventory
             return Math.Max(1, Math.Min(3, RollWeighted(weights).Quantity));
         }
 
-        private static RandomOptionEntry RollOptionValue(int optionId, int itemLevel)
+        // internal: SelfTest 需要按 (optionId, itemLevel) 定点验证 roll 行为。
+        internal static RandomOptionEntry RollOptionValue(int optionId, int itemLevel)
         {
             if (!OptionFiles.Value.TryGetValue(optionId, out var relativePath))
                 return new RandomOptionEntry { Type = ClampByte(optionId), Value1 = 1, Value2 = 1 };
@@ -314,7 +315,7 @@ namespace DfoServer.Game.Inventory
                 return new RandomOptionEntry
                 {
                     Type = ClampByte(optionId),
-                    Value1 = ClampByte(values.value1),
+                    Value1 = ClampByte(RollOptionValueInRange(values.value1, values.value2)),
                     Value2 = ClampByte(values.value2),
                 };
             }
@@ -325,11 +326,30 @@ namespace DfoServer.Game.Inventory
             }
         }
 
+        // 在截断到字节域后的官方区间内均匀 roll, 避免先 roll 再 clamp 在 255 处形成概率尖峰。
+        private static int RollOptionValueInRange(int minValue, int maxValue)
+        {
+            var maxEff = Math.Min(maxValue, 255);
+            var minEff = Math.Min(minValue, maxEff);
+            if (minEff > maxEff)
+                minEff = maxEff;
+
+            return Random.Shared.Next(minEff, maxEff + 1);
+        }
+
         private static (int value1, int value2) ResolveLevelValues(string text, int itemLevel)
         {
             var bestLevel = -1;
             var bestValues = (value1: 1, value2: 1);
-            var matches = Regex.Matches(text ?? string.Empty, @"\[level\]\s*(.*?)\[/level\]", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+            // 只取第一个 [dungeon] 块内的等级行; 部分属性文件在 [pvp] 段还有一份数值更低的行,
+            // 全文扫描会让同级的 PvP 行覆盖 PvE 行。无 [dungeon] 段的文件回退为全文扫描。
+            var source = text ?? string.Empty;
+            var dungeonMatch = Regex.Match(source, @"\[dungeon\](.*?)\[/dungeon\]", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+            if (dungeonMatch.Success)
+                source = dungeonMatch.Groups[1].Value;
+
+            var matches = Regex.Matches(source, @"\[level\]\s*(.*?)\[/level\]", RegexOptions.Singleline | RegexOptions.IgnoreCase);
             foreach (Match match in matches)
             {
                 var ints = Regex.Matches(match.Groups[1].Value, @"-?\d+")
