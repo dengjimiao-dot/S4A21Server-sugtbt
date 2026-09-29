@@ -48,10 +48,23 @@ namespace DfoServer.Game.Quests
                         return result;
                     }
 
-                    var next = QuestProgressReducer.ApplyClientMutation(
-                        current,
-                        request.TriggerType,
-                        request.Increment);
+                    QuestTrigger next;
+                    if (GameWorld.QuestData.IsQuestionQuest(quest.QuestId))
+                    {
+                        var answerIndex = request.QuestionAnswerIndex;
+                        if (!answerIndex.HasValue
+                            || answerIndex.Value >= GameWorld.QuestData
+                                .GetQuestionAnswerCount(quest.QuestId))
+                            return result;
+                        next = new QuestTrigger(answerIndex.Value);
+                    }
+                    else
+                    {
+                        next = QuestProgressReducer.ApplyClientMutation(
+                            current,
+                            request.TriggerType,
+                            request.Increment);
+                    }
                     result.Matched = true;
                     result.Trigger = next;
                     result.AddChange(quest.QuestId, current, next);

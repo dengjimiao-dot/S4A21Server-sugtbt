@@ -65,6 +65,8 @@ namespace DfoServer
             ("--selftest-quest-completion-ticket", SelfTests.QuestCompletionTicketSelfTest.Run),
             ("--selftest-anton-raid-phase-quest", SelfTests.AntonRaidPhaseQuestSelfTest.Run),
             ("--selftest-quest-progress-batch", SelfTests.QuestProgressBatchSelfTest.Run),
+            ("--selftest-quest-chain-availability", SelfTests.QuestChainAvailabilitySelfTest.Run),
+            ("--selftest-quest-question-branch", SelfTests.QuestQuestionBranchSelfTest.Run),
             ("--selftest-level-up-ticket", SelfTests.LevelUpTicketSelfTest.Run),
             ("--selftest-growup-change", SelfTests.GrowupChangeSelfTest.Run),
             ("--selftest-cargo-transport-stone", SelfTests.CargoTransportStoneSelfTest.Run),
