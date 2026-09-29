@@ -863,7 +863,10 @@ namespace DfoServer.Infrastructure
                 eventJoustHandler,
                 eventPcRoomTimePointHandler,
                 eventDailyAttendanceAnytimeHandler,
-                eventTotalAttendanceHandler);
+                eventTotalAttendanceHandler,
+                new NpcFavorHandler(
+                    core.Database,
+                    inventory.InventoryRefreshSender));
         }
 
         internal CharacterSessionLifecycleCoordinator
