@@ -403,6 +403,36 @@ namespace DfoServer.Game.Quests
         }
 
         internal IReadOnlyList<QuestSetTriggerResult>
+            SyncRaidPhaseClearQuestProgress(
+                int characterId,
+                int phaseIndex,
+                Guid sourceEventId)
+        {
+            if (characterId <= 0
+                || (phaseIndex != 0 && phaseIndex != 1)
+                || sourceEventId == Guid.Empty)
+            {
+                return Array.Empty<QuestSetTriggerResult>();
+            }
+
+            var applied = _progress.Apply(new QuestProgressApplicationRequest
+            {
+                CharacterId = characterId,
+                Operation = QuestProgressOperation.RaidPhaseClear,
+                RaidPhaseIndex = phaseIndex,
+                SourceEventId = sourceEventId,
+            });
+            if (!applied.Success)
+            {
+                throw new InvalidOperationException(
+                    $"raid phase quest progress failed: cid={characterId} " +
+                    $"phase={phaseIndex} event={sourceEventId:N} " +
+                    $"error={applied.Error}");
+            }
+            return applied.Changes;
+        }
+
+        internal IReadOnlyList<QuestSetTriggerResult>
             SyncHuntMonsterQuestProgress(
                 int characterId,
                 int dungeonId,

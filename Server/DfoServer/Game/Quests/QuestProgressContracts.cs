@@ -11,6 +11,7 @@ namespace DfoServer.Game.Quests
         ClearDungeon = 3,
         SeekingItems = 4,
         HuntEnemy = 5,
+        RaidPhaseClear = 6,
     }
 
     internal sealed class QuestProgressApplicationRequest
@@ -27,6 +28,8 @@ namespace DfoServer.Game.Quests
         internal int MonsterCode { get; set; }
         internal byte MonsterType { get; set; }
         internal int EnemyType { get; set; }
+        internal int RaidPhaseIndex { get; set; }
+        internal bool RepairLegacyRaidPhaseTrigger { get; set; }
         internal IReadOnlyCollection<ushort> EligibleQuestIds { get; set; }
         internal IReadOnlyDictionary<ushort, QuestActivationId>
             EligibleQuestActivations { get; set; }
@@ -50,6 +53,8 @@ namespace DfoServer.Game.Quests
                         return "clear-map";
                     case QuestProgressOperation.SeekingItems:
                         return "seeking-items";
+                    case QuestProgressOperation.RaidPhaseClear:
+                        return "raid-phase-clear";
                     default:
                         return "client-trigger";
                 }
