@@ -75,6 +75,14 @@ namespace DfoServer.Game.Inventory
                 return false;
             }
 
+            // 幸运券只适用于强化/增幅 +14 及以下的装备（+15 及以上拒绝使用）。
+            if (command.Method == ItemUpgradeMethod.LuckyEnchantDeed
+                && currentLevel > ItemUpgradeConsumableResolver.GetLuckyDeedMaxSourceLevel())
+            {
+                result = ItemUpgradeResult.Error(command, ItemUpgradeResult.ErrorMaxLevel);
+                return false;
+            }
+
             if (IsItemLocked(inventory, target))
             {
                 result = ItemUpgradeResult.Error(command, ItemUpgradeResult.ErrorLocked);

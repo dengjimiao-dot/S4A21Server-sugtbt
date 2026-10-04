@@ -198,6 +198,10 @@ namespace DfoServer.Game.ItemUpgrade
         // 概率在 PVF 中没有定义，按 explain 文案取 50/50。
         private const int LuckyDeedSuccessWeight = 50000;
 
+        // 幸运券只适用于「强化/增幅 +14 及以下」的装备：
+        // 当前等级 > 14 时拒绝使用；对 +14 使用成功可到 +15。
+        private const int LuckyDeedMaxSourceLevel = 14;
+
         private static ItemUpgradeConsumableConfig FromLuckyDeed(
             int itemTemplateId,
             StackableItemFile stackable)
@@ -227,6 +231,8 @@ namespace DfoServer.Game.ItemUpgrade
         }
 
         internal static int GetLuckyDeedSuccessWeight() => LuckyDeedSuccessWeight;
+
+        internal static int GetLuckyDeedMaxSourceLevel() => LuckyDeedMaxSourceLevel;
 
         private static ItemUpgradeConsumableConfig FromTicket(
             int itemTemplateId,
