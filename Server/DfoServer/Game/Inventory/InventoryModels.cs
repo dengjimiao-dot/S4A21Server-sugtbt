@@ -540,6 +540,29 @@ namespace DfoServer.Game.Inventory
         public List<InventoryMutationResult> ConsumedEmblems { get; } = new List<InventoryMutationResult>();
     }
 
+    public sealed class EquipmentEmblemCollectResult
+    {
+        public InventoryListType TargetListType { get; set; } = InventoryListType.Main;
+
+        public short TargetSlotIndex { get; set; }
+
+        public bool TargetEquipped { get; set; }
+
+        public int ReturnedEmblemTemplateId { get; set; }
+
+        public int DestroyedEmblemTemplateId { get; set; }
+
+        public InventoryListType ReturnedEmblemListType { get; set; } = InventoryListType.Main;
+
+        public short ReturnedEmblemSlotIndex { get; set; } = -1;
+
+        public int BoxItemTemplateId { get; set; }
+
+        public short BoxSlotIndex { get; set; }
+
+        public int BoxRemainingCount { get; set; }
+    }
+
     public sealed class AvatarSocketMutationResult
     {
         public InventoryMutationResult MaterialItem { get; set; }
