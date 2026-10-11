@@ -42,6 +42,7 @@ namespace DfoServer
             ("--selftest-a21-dungeon-drop-item", SelfTests.A21DungeonDropItemSelfTest.Run),
             ("--selftest-a21-mouse-registration", SelfTests.A21MouseRegistrationSelfTest.Run),
             ("--selftest-enchant-by-bead-listtype", SelfTests.EnchantByBeadListTypeSelfTest.Run),
+            ("--selftest-emblem-collect-item", SelfTests.EmblemCollectItemSelfTest.Run),
             ("--selftest-buy-skill-tp-refund", SelfTests.BuySkillTpRefundSelfTest.Run),
             ("--selftest-compound-item-ack", SelfTests.CompoundItemAckSelfTest.Run),
             ("--selftest-daily-reset-account", SelfTests.DailyResetAccountSelfTest.Run),
