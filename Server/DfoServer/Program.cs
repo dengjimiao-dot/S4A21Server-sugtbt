@@ -98,6 +98,7 @@ namespace DfoServer
             ("--selftest-random-option-value-roll", SelfTests.RandomOptionValueRollSelfTest.Run),
             ("--selftest-random-option-grade-reroll", SelfTests.RandomOptionGradeRerollSelfTest.Run),
             ("--selftest-booster-selection-num", SelfTests.BoosterSelectionNumSelfTest.Run),
+            ("--selftest-account-experience-buffer", SelfTests.AccountExperienceBufferSelfTest.Run),
         };
 
         // 顺序跑全部自测, 输出汇总表; 任一失败(或抛异常)退出码为 1。
@@ -326,6 +327,8 @@ namespace DfoServer
             server.Start(portConfigs);
 
             Game.Inventory.InventoryPersistenceService.RegisterClock(Infrastructure.ClockService.Instance);
+            Game.Accounts.AccountExperienceBuffer.Instance
+                .RegisterClock(Infrastructure.ClockService.Instance);
             Infrastructure.ClockService.Instance.Start();
 
             if (GameNetworkConfig.ProxyMode)
@@ -389,6 +392,11 @@ namespace DfoServer
 
             server.Stop();
             Game.Inventory.InventoryPersistenceService.SaveAllDirty();
+            // 账号级荣誉/成长胶囊经验只累计内存, 停机前有界地落库一次;
+            // FlushAll 是同步逐账号写, 失败仅记日志(内存 pending 不再有机会重试)。
+            if (!Game.Accounts.AccountExperienceBuffer.Instance.FlushAll())
+                FileLogger.Log(
+                    "[Shutdown] account experience flush incomplete");
             PacketFileLogger.Shutdown(TimeSpan.FromSeconds(5));
             // 服务停止后不再产生常规业务日志，此时完成队列并等待后台写入结束，避免退出时丢失尾部日志。
             FileLogger.Shutdown(TimeSpan.FromSeconds(5));
