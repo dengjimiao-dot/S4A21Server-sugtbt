@@ -566,7 +566,9 @@ CREATE TABLE idx_character_level_up_events_pending (invalid_schema INTEGER);");
             fixture.Execute("DROP TABLE idx_character_level_up_events_pending;");
             fixture.ApplyMigrations();
             var unsupportedVersion = SqliteMigrations.CurrentVersion + 1;
-            fixture.Execute($"UPDATE schema_metadata SET schema_version={unsupportedVersion}; PRAGMA user_version={unsupportedVersion};");
+            fixture.Execute(
+                $"UPDATE schema_metadata SET schema_version={unsupportedVersion}; " +
+                $"PRAGMA user_version={unsupportedVersion};");
             rejected = false;
             try { fixture.ApplyMigrations(); }
             catch (InvalidOperationException) { rejected = true; }
