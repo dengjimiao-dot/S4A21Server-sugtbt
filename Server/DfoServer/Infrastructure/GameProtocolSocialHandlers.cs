@@ -21,11 +21,13 @@ namespace DfoServer.Infrastructure
             GuildMemberHandler guildMembers,
             GuildJoinHandler guildJoin,
             GuildManagementHandler guildManagement,
+            GuildFacilityHandler guildFacility,
             ItemTradeHandler trade)
         {
             Trade = trade ?? throw new ArgumentNullException(nameof(trade));
             GuildJoin = guildJoin ?? throw new ArgumentNullException(nameof(guildJoin));
             GuildManagement = guildManagement ?? throw new ArgumentNullException(nameof(guildManagement));
+            GuildFacility = guildFacility ?? throw new ArgumentNullException(nameof(guildFacility));
             GuildMembers = guildMembers ?? throw new ArgumentNullException(nameof(guildMembers));
             GuildCreation = guildCreation ?? throw new ArgumentNullException(nameof(guildCreation));
             Party = party ?? throw new ArgumentNullException(nameof(party));
@@ -46,6 +48,7 @@ namespace DfoServer.Infrastructure
         internal GuildMemberHandler GuildMembers { get; }
         internal GuildJoinHandler GuildJoin { get; }
         internal GuildManagementHandler GuildManagement { get; }
+        internal GuildFacilityHandler GuildFacility { get; }
 
         internal PartyHandler Party { get; }
 
