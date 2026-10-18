@@ -296,6 +296,11 @@ namespace DfoServer.Network
                 })
                     d[(ushort)command] = _socialHandlers.GuildFacility.Handle;
             });
+            _cmdDispatch.RegisterGroup("guild-invite", d =>
+            {
+                d[(ushort)CmdPacketTypeA21.CALL_GUILD_INVITE] = _socialHandlers.GuildInvite.Handle;
+                d[(ushort)CmdPacketTypeA21.REPLY_GUILD_INVITE] = _socialHandlers.GuildInvite.Handle;
+            });
             _cmdDispatch.RegisterGroup("event-joust", RegisterEventJoustHandlers);
             _cmdDispatch.RegisterGroup("npc-favor", _npcFavorHandler.RegisterHandlers);
         }
