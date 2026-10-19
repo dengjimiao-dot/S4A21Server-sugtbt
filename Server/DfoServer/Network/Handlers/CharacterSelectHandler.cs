@@ -3,6 +3,7 @@ using DfoServer.Game.Appearance;
 using DfoServer.Game.DailyReset;
 using DfoServer.Game.Characters;
 using DfoServer.Game.Friends;
+using DfoServer.Game.Guilds;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.KnightShield;
 using DfoServer.Game.Mercenary;
@@ -529,13 +530,17 @@ namespace DfoServer.Network.Handlers
                 }
             }
 
+            var guildEntranceNotices = GuildStatePublisher.BuildLoginNotices(
+                new GuildRepository(_database),
+                ownerCharId);
             foreach (var packet in SelectCharacterPacketBuilder.BuildPacketStream(
                          _selectCharacterDataSource,
                          ownerCharId,
                          ownerAcctId,
                          pvpSkillOverride,
                          selectedSpawn,
-                         _initPacketBuilders))
+                         _initPacketBuilders,
+                         guildEntranceNotices))
                 await session.SendPacketAsync(packet);
 
             if (InventoryContext.TryGetLease(ownerCharId, out var inventoryLease)
