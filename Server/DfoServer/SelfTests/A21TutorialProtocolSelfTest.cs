@@ -26,6 +26,7 @@ namespace DfoServer.SelfTests
             var failures = 0;
 
             VerifySlotExpansionFinish(ref failures);
+            VerifyAccountTutorialRestore(ref failures);
 
             Check(
                 "A21 EXP/DIE_MONSTER/GET_ITEM opcodes are direction-specific",
@@ -3685,6 +3686,51 @@ namespace DfoServer.SelfTests
                     ? "A21_TUTORIAL_PROTOCOL selftest passed."
                     : $"A21_TUTORIAL_PROTOCOL selftest failed: {failures}");
             return failures == 0 ? 0 : 1;
+        }
+
+        private static void VerifyAccountTutorialRestore(ref int failures)
+        {
+            // A21 02F0DC30 registers NOTI725 -> 00ACEA60. The consumer clears
+            // its 16 account flags on EACH packet, then reads count + u8 flags.
+            // Auction factory case8 has role sentinel101 and account flag8;
+            // closing tutorial window301 reaches mode1/flag8 just like Finish.
+            var snapshot = new SelectCharacterDataSnapshot();
+            snapshot.InitializationSnapshot.AccountTutorialFlags.Add(8);
+            var templates = NewCharacterInitSequence.Build().Where(template =>
+                template.Command == 0 && template.Type == (ushort)NotiPacketTypeA21.ACCOUNT_TUTORIAL_INFO).ToArray();
+            Check("account tutorial login emits one complete snapshot without later clearing packets",
+                templates.Length == 1 && templates[0].OccurrenceIndex == 0, ref failures);
+            var sequence = NewCharacterInitSequence.Build();
+            var selectIndex = sequence.FindIndex(template => template.Command == 1
+                && template.Type == (ushort)CmdPacketTypeA21.SELECT_CHARACTER);
+            var accountIndex = sequence.FindIndex(template => template.Command == 0
+                && template.Type == (ushort)NotiPacketTypeA21.ACCOUNT_TUTORIAL_INFO);
+            var actorIndex = sequence.FindIndex(template => template.Command == 0
+                && template.Type == (ushort)NotiPacketTypeA21.USERINFO);
+            Check("account tutorials restore after select and before actor creation can queue UI",
+                selectIndex >= 0 && accountIndex == selectIndex + 1 && accountIndex < actorIndex, ref failures);
+            var builder = new DailyScheduleBodyBuilder();
+            var nativeAccountFlags = new bool[16];
+            foreach (var template in templates)
+            {
+                if (!builder.TryBuild(snapshot, template.OccurrenceIndex, out var payload))
+                    continue;
+                Array.Clear(nativeAccountFlags);
+                var count = payload[0];
+                for (var i = 0; i < count && i + 1 < payload.Length; i++)
+                    if (payload[i + 1] < nativeAccountFlags.Length)
+                        nativeAccountFlags[payload[i + 1]] = true;
+            }
+            Check("native account consumer restores auction flag8 after the complete login stream",
+                nativeAccountFlags[8] && nativeAccountFlags.Count(value => value) == 1, ref failures);
+            builder.TryBuild(snapshot, 0, out var saved);
+            Check("account tutorial saved auction body is count1 flag8",
+                saved.SequenceEqual(new byte[] { 1, 8 }), ref failures);
+            var unseen = new SelectCharacterDataSnapshot();
+            builder.TryBuild(unseen, 0, out var empty);
+            Check("unseen account receives only count0 and remains eligible for its first tutorial",
+                empty.SequenceEqual(new byte[] { 0 }) && unseen.InitializationSnapshot.AccountTutorialFlags.Count == 0,
+                ref failures);
         }
 
         private static void VerifyQuestMazeMapEntranceAffinity(ref int failures)

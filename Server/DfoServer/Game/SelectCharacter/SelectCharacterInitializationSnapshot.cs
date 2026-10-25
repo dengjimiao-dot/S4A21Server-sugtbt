@@ -87,6 +87,10 @@ namespace DfoServer.Game.SelectCharacter
 
         public List<Unknown725Snapshot> Unknown725Packets { get; } = new List<Unknown725Snapshot>();
 
+        // A21 NOTI ACCOUNT_TUTORIAL_INFO restores the independent 16-flag
+        // account namespace; it is not the SELECT_CHARACTER role flag list.
+        public List<byte> AccountTutorialFlags { get; } = new List<byte>();
+
         public SkillInfoSnapshot SkillInfo { get; set; } = new SkillInfoSnapshot();
 
         public List<byte[]> DarkKnightComboSkillInfoBodies { get; } = new List<byte[]>();

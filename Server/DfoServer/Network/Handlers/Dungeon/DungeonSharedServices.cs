@@ -23,6 +23,7 @@ namespace DfoServer.Network.Handlers.Dungeon
         internal string ConnectionString { get; }
         internal IGameDatabase Database { get; }
         internal SqliteSelectCharacterDataSource SelectCharacterDataSource { get; }
+        internal Game.Tutorials.AccountTutorialFlagStore AccountTutorialFlags { get; }
         internal IRentalTimeProvider RentalTimeProvider { get; }
         internal InventoryRefreshSender InventoryRefresh { get; }
         internal IMercenaryRestrictionService MercenaryRestrictions { get; }
@@ -117,6 +118,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             PartyPackets = new PartyPacketSender(Sessions);
             SelectCharacterDataSource = selectCharacterDataSource
                 ?? throw new ArgumentNullException(nameof(selectCharacterDataSource));
+            AccountTutorialFlags = SelectCharacterDataSource.AccountTutorialFlags;
             InventoryRefresh = inventoryRefresh;
             MercenaryRestrictions = mercenaryRestrictions;
             RentalTimeProvider = rentalTimeProvider

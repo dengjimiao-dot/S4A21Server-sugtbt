@@ -50,6 +50,7 @@ namespace DfoServer.Network.Handlers
         private readonly InventoryRefreshSender _inventoryRefreshSender;
         private readonly IGameDatabase _database;
         private readonly DailyResetService _dailyResetService;
+        private readonly Func<int, int, bool> _adminCharacterWriteBlocked;
 
         internal CharacterSessionLifecycleCoordinator(
             LoginHandler loginHandler,
@@ -71,7 +72,8 @@ namespace DfoServer.Network.Handlers
             PvpRoomHandler pvpRoomHandler,
             InventoryRefreshSender inventoryRefreshSender,
             IGameDatabase database,
-            DailyResetService dailyResetService = null)
+            DailyResetService dailyResetService = null,
+            Func<int, int, bool> adminCharacterWriteBlocked = null)
         {
             _loginHandler = loginHandler;
             _characterSelectHandler = characterSelectHandler;
@@ -94,6 +96,7 @@ namespace DfoServer.Network.Handlers
             _inventoryRefreshSender = inventoryRefreshSender;
             _database = database ?? throw new ArgumentNullException(nameof(database));
             _dailyResetService = dailyResetService ?? new DailyResetService(_database);
+            _adminCharacterWriteBlocked = adminCharacterWriteBlocked;
         }
 
         internal async Task HandleConnectedAsync(
@@ -444,6 +447,32 @@ namespace DfoServer.Network.Handlers
             {
                 try
                 {
+                    // Check the durable target fence under the shared character gate.
+                    // A disabled management pipe still honors pending writes after restart.
+                    if (_adminCharacterWriteBlocked?.Invoke(
+                            session.Account?.AccountId ?? 0, selectedCharacterId) == true)
+                    {
+                        await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                            0x01, (ushort)CmdPacketType.SELECT_CHARACTER,
+                            SelectCharacterAckBodyBuilder.BuildRejected(19)));
+                        session.Close();
+                        return;
+                    }
+                    if (!DfoServer.Game.SelectCharacter.CharacterSelectionRefreshGuard.TryGetFresh(
+                            _characterRepository.GetById,
+                            session.Account?.AccountId ?? 0,
+                            selectedCharacterId,
+                            out var refreshedCharacter)
+                        || GameChannelAdmissionPolicy.TryGetCharacterEntryRejection(
+                            session.ListenerPort, refreshedCharacter.Level, out _))
+                    {
+                        await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
+                            0x01, (ushort)CmdPacketType.SELECT_CHARACTER,
+                            SelectCharacterAckBodyBuilder.BuildRejected(19)));
+                        session.Close();
+                        return;
+                    }
+                    selectedCharacter = refreshedCharacter;
                     var displaced = await _sessionDirectory
                         .RegisterReplacingAsync(
                             selectedCharacterId,
@@ -462,6 +491,9 @@ namespace DfoServer.Network.Handlers
                             selectedSlot);
                     var prepared =
                         session.Player?.CharacterId == selectedCharacterId
+                        && session.TcpClient?.Connected == true
+                        && InventoryContext.TryGetOwnedLease(session.SessionId, selectedCharacterId, out var preparedInventory)
+                        && InventoryContext.IsCurrentLease(preparedInventory, session.SessionId, selectedCharacterId)
                         && _sessionDirectory.TryGet(
                             selectedCharacterId,
                             out var current)
@@ -878,7 +910,7 @@ namespace DfoServer.Network.Handlers
             if (session == null || characterId <= 0)
                 return false;
 
-            if (!InventoryContext.TryGetLease(characterId, out var lease))
+            if (!InventoryContext.TryGetLeaseForRecovery(characterId, out var lease))
                 return true;
 
             return lease.IsOwnedBy(session.SessionId)
@@ -893,7 +925,7 @@ namespace DfoServer.Network.Handlers
                 return false;
             if (TrySaveCurrentInventoryLease(session, characterId))
                 return true;
-            if (!InventoryContext.TryGetLease(
+            if (!InventoryContext.TryGetLeaseForRecovery(
                     characterId,
                     out var lease)
                 || !lease.IsOwnedBy(session.SessionId))
@@ -906,9 +938,9 @@ namespace DfoServer.Network.Handlers
                 return false;
             try
             {
-                InventoryRollbackRecoveryService.ReloadOnlineInventory(
+                if (!InventoryRollbackRecoveryService.ReloadOnlineInventory(
                     connectionString,
-                    lease);
+                    lease)) return false;
                 FileLogger.Log(
                     $"[{ProtocolName}] disconnect inventory reloaded from " +
                     $"database after save failure: cid={characterId} " +

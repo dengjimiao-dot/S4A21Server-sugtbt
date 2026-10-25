@@ -1,30 +1,30 @@
 using DfoServer.Game.SelectCharacter;
 using DfoServer.Network;
+using System;
+using System.Linq;
 
 namespace DfoServer.Network.Builders
 {
     public sealed class DailyScheduleBodyBuilder : IInitPacketBuilder
     {
-        public ushort NotiType => 0x02D5;
+        // Legacy class name: A21 NOTI725 is account tutorial info, not a daily
+        // schedule. 02F0DC30 -> 00ACEA60 clears all16 bits before each snapshot.
+        public ushort NotiType => (ushort)NotiPacketTypeA21.ACCOUNT_TUTORIAL_INFO;
 
         public bool TryBuild(SelectCharacterDataSnapshot snapshot, int occurrenceIndex, out byte[] body)
         {
-            var packets = snapshot.InitializationSnapshot.Unknown725Packets;
-            if (occurrenceIndex < 0 || occurrenceIndex >= packets.Count)
+            if (occurrenceIndex != 0)
             {
-                
-                var w = new GamePacketWriter();
-                w.WriteInt32(0); w.WriteInt32(0); w.WriteInt32(0); w.WriteInt32(0);
-                body = w.ToArray();
-                return true;
+                body = null;
+                return false;
             }
-
-            var packet = packets[occurrenceIndex];
+            var flags = snapshot.InitializationSnapshot.AccountTutorialFlags;
+            if (flags.Count > 16 || flags.Any(flag => flag >= 16) || flags.Distinct().Count() != flags.Count)
+                throw new InvalidOperationException("Invalid account tutorial snapshot.");
             var writer = new GamePacketWriter();
-            writer.WriteInt32(packet.ParamA);
-            writer.WriteInt32(packet.ModeOrState);
-            writer.WriteInt32(packet.ContentId);
-            writer.WriteInt32(packet.ParamB);
+            writer.WriteByte((byte)flags.Count);
+            foreach (var flag in flags.OrderBy(value => value))
+                writer.WriteByte(flag);
             body = writer.ToArray();
             return true;
         }

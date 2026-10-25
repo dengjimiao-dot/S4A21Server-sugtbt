@@ -1,4 +1,4 @@
-﻿using DfoServer.Game.Accounts;
+using DfoServer.Game.Accounts;
 using DfoServer.Game.CharacterData;
 using DfoServer.Game.Characters;
 using DfoServer.Game.DailyReset;
@@ -31,7 +31,7 @@ namespace DfoServer.Infrastructure
 {
     // 正式运行时组合根。当前首批先统一数据库与协议处理器入口，
     // 后续按业务模块把 GameProtocolHandler 内的对象装配逐步迁到这里。
-    public sealed class ServerRuntimeBuilder : IDisposable
+    public sealed partial class ServerRuntimeBuilder : IDisposable
     {
         private GameProtocolCoreDependencies _gameProtocolCore;
         private GameProtocolInventoryDependencies _gameProtocolInventory;
@@ -132,9 +132,18 @@ namespace DfoServer.Infrastructure
                 townDungeonHandlers,
                 socialHandlers,
                 featureHandlers,
-                characterSessionLifecycle);
+                characterSessionLifecycle,
+                _auctionRuntime);
+            if (_auctionRuntime != null)
+            {
+                // Only network notifications are asynchronous. All DB recovery
+                // and expiry work remains synchronous under the market gate.
+                _auctionRuntime.DeliveriesCommitted += recipients => _ = handler.NotifyAuctionDeliveriesAsync(recipients);
+                _auctionRuntime.Start(ClockService.Instance);
+            }
             _levelUpRewardRecovery = handler.StartLevelUpRewardRecovery(ClockService.Instance);
             _gameProtocolBuilt = true;
+            StartAdministration(core, world);
             return handler;
         }
 
@@ -174,7 +183,9 @@ namespace DfoServer.Infrastructure
                 inventoryLifecycle,
                 rentalTimeProvider,
                 dailyResetService,
-                antonProgress);
+                antonProgress,
+                new Game.Tutorials.AccountTutorialFlagStore(
+                    Game.Tutorials.AccountTutorialDatabase.Open()));
             var getUserInfoTemplate = new SqliteUserInfoBlobRepository(Database)
                 .LoadGetUserInfoTemplate();
             var eventManager = new EventManager(Database);
@@ -938,7 +949,10 @@ namespace DfoServer.Infrastructure
                     expertJobHandlers,
                     townDungeonHandlers,
                     socialHandlers,
-                    featureHandlers);
+                    featureHandlers,
+                    (accountId, characterId) =>
+                        GetOrCreateAdminCharacterWriteFences().IsBlocked(
+                            accountId, characterId, out _));
             return _characterSessionLifecycle;
         }
 
@@ -952,7 +966,8 @@ namespace DfoServer.Infrastructure
                 GameProtocolExpertJobHandlers expertJobHandlers,
                 GameProtocolTownDungeonHandlers townDungeonHandlers,
                 GameProtocolSocialHandlers socialHandlers,
-                GameProtocolFeatureHandlers featureHandlers)
+                GameProtocolFeatureHandlers featureHandlers,
+                Func<int, int, bool> adminCharacterWriteBlocked = null)
         {
             if (core == null) throw new ArgumentNullException(nameof(core));
             if (inventory == null) throw new ArgumentNullException(nameof(inventory));
@@ -988,7 +1003,8 @@ namespace DfoServer.Infrastructure
                 socialHandlers.PvpRoom,
                 inventory.InventoryRefreshSender,
                 core.Database,
-                core.DailyResetService);
+                core.DailyResetService,
+                adminCharacterWriteBlocked);
         }
 
         public void Dispose()
@@ -997,6 +1013,8 @@ namespace DfoServer.Infrastructure
                 return;
 
             _disposed = true;
+            DisposeAdministration();
+            _auctionRuntime?.Dispose();
             _levelUpRewardRecovery?.Dispose();
             _gameProtocolSocialHandlers?.Dispose();
             _gameProtocolWorld?.Dispose();
