@@ -50,7 +50,6 @@ namespace DfoServer.Network.Handlers
         private readonly InventoryRefreshSender _inventoryRefreshSender;
         private readonly IGameDatabase _database;
         private readonly DailyResetService _dailyResetService;
-        private readonly Func<int, int, bool> _adminCharacterWriteBlocked;
 
         internal CharacterSessionLifecycleCoordinator(
             LoginHandler loginHandler,
@@ -72,8 +71,7 @@ namespace DfoServer.Network.Handlers
             PvpRoomHandler pvpRoomHandler,
             InventoryRefreshSender inventoryRefreshSender,
             IGameDatabase database,
-            DailyResetService dailyResetService = null,
-            Func<int, int, bool> adminCharacterWriteBlocked = null)
+            DailyResetService dailyResetService = null)
         {
             _loginHandler = loginHandler;
             _characterSelectHandler = characterSelectHandler;
@@ -96,7 +94,6 @@ namespace DfoServer.Network.Handlers
             _inventoryRefreshSender = inventoryRefreshSender;
             _database = database ?? throw new ArgumentNullException(nameof(database));
             _dailyResetService = dailyResetService ?? new DailyResetService(_database);
-            _adminCharacterWriteBlocked = adminCharacterWriteBlocked;
         }
 
         internal async Task HandleConnectedAsync(
@@ -447,17 +444,6 @@ namespace DfoServer.Network.Handlers
             {
                 try
                 {
-                    // Check the durable target fence under the shared character gate.
-                    // A disabled management pipe still honors pending writes after restart.
-                    if (_adminCharacterWriteBlocked?.Invoke(
-                            session.Account?.AccountId ?? 0, selectedCharacterId) == true)
-                    {
-                        await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
-                            0x01, (ushort)CmdPacketType.SELECT_CHARACTER,
-                            SelectCharacterAckBodyBuilder.BuildRejected(19)));
-                        session.Close();
-                        return;
-                    }
                     if (!DfoServer.Game.SelectCharacter.CharacterSelectionRefreshGuard.TryGetFresh(
                             _characterRepository.GetById,
                             session.Account?.AccountId ?? 0,

@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using DfoServer.Game.Auction.Assets;
-using DfoServer.Game.Auction.Admin;
 using DfoServer.Game.Auction.Storage;
 using DfoServer.Game.Inventory;
 using DfoServer.Game.Mailbox;
@@ -83,48 +82,29 @@ namespace DfoServer.Game.Auction.Transactions
                         {
                             if (AuctionPublicReceiptRepository.Find(c, t, intent) != null) return true;
                             if (precondition != null && !precondition(c, t)) return false;
-                            if (!Current(lease, intent) || !Active(c, t, intent.CharacterId, intent.AccountId)
-                                || !AdministrativeOwnersActive(c,t,intent)) return false;
+                            if (!Current(lease, intent) || !Active(c, t, intent.CharacterId, intent.AccountId)) return false;
                             var messages = plan.CopySystemMails();
                             foreach (var message in messages)
                                 if (!Active(c, t, message.SenderCharacterId, message.SenderAccountId)
                                     || !Active(c, t, message.ReceiverCharacterId, message.ReceiverAccountId)) return false;
                             var inventory = lease.Inventory;
-                            var admin = AuctionAdminEffects.Read(intent, codec);
                             int gold = inventory.GetMainVirtualCount(InventoryService.MainVirtualCurrencySlotStart)?.Count ?? 0;
                             if (gold < plan.GoldDebit) return false;
-                            if(admin.GoldBefore.HasValue&&admin.GoldBefore.Value!=gold)return false;
-                            if ((long)gold - plan.GoldDebit + admin.GoldCredit > int.MaxValue) return false;
-                            if(admin.GoldCredit>0&&(long)gold-plan.GoldDebit+admin.GoldCredit>
-                                DfoServer.Game.Currency.CharacterGoldLimitRepository.LoadEffectiveGoldCarryLimit(c,t,intent.CharacterId))return false;
-                            foreach (var grant in admin.Grants)
-                            {
-                                var old = inventory.GetItem(grant.List, grant.Slot);
-                                if (old != null && !old.IsEmpty) return false;
-                                if (!InventoryInsertService.TryPlanInsertIntoSlot(inventory,
-                                    codec.DecodeStrict(codec.DeserializeStrict(grant.EnvelopeJson)), grant.Quantity,
-                                    grant.List, grant.Slot, out var insertion) || insertion.MergeIntoExistingSlot
-                                    || insertion.RemainingCount != 0) return false;
-                            }
                             foreach (var debit in plan.ItemDebits)
                             {
                                 if (!codec.MatchesSource(inventory, debit.List, debit.Slot, debit.Source)) return false;
                                 var core = inventory.GetItem(debit.List, debit.Slot);
                                 if (core.EquipmentLockId != 0 || core.SortLockFlag != 0) return false;
                             }
-                            inventoryTouched = plan.ItemDebits.Count > 0 || plan.GoldDebit > 0 || admin.GoldCredit > 0 || admin.Grants.Count > 0;
+                            inventoryTouched = plan.ItemDebits.Count > 0 || plan.GoldDebit > 0;
                             foreach (var debit in plan.ItemDebits)
                             {
                                 var source = codec.DecodeStrict(debit.Source);
                                 if (!InventoryDeleteService.TryConsumeFromSlot(inventory, debit.List, debit.Slot,
                                     source.ItemId, debit.Count, out var deleted) || !deleted.Success || deleted.DeletedCount != debit.Count) return false;
                             }
-                            if ((plan.GoldDebit > 0 || admin.GoldCredit > 0) && !inventory.SetMainVirtualCount(
-                                InventoryService.MainVirtualCurrencySlotStart, checked(gold - plan.GoldDebit + admin.GoldCredit))) return false;
-                            foreach (var grant in admin.Grants)
-                                if (!InventoryInsertService.TryInsertIntoSlot(inventory,
-                                    codec.DecodeStrict(codec.DeserializeStrict(grant.EnvelopeJson)), grant.Quantity,
-                                    grant.List, grant.Slot, out var insertion) || insertion.RemainingCount != 0) return false;
+                            if (plan.GoldDebit > 0 && !inventory.SetMainVirtualCount(
+                                InventoryService.MainVirtualCurrencySlotStart, checked(gold - plan.GoldDebit))) return false;
                             var mailIds = new List<long>();
                             foreach (var message in messages)
                             {
@@ -164,10 +144,8 @@ namespace DfoServer.Game.Auction.Transactions
         {
             if (intent == null || plan == null) throw new ArgumentNullException();
             RequireBoundPlan(intent, plan);
-            var adminEffects=AuctionAdminEffects.Read(intent,codec);
-            if (intent.Action is not (AuctionOperationAction.Expire or AuctionOperationAction.Admin)
-                || plan.GoldDebit != 0 || plan.ItemDebits.Count != 0
-                || adminEffects.GoldCredit!=0||adminEffects.Grants.Count!=0||adminEffects.GoldBefore.HasValue)
+            if (intent.Action != AuctionOperationAction.Expire
+                || plan.GoldDebit != 0 || plan.ItemDebits.Count != 0)
                 throw new ArgumentException("Offline auction delivery must be a funded expiry without public debits.");
             lock (marketGate)
             {
@@ -189,7 +167,7 @@ namespace DfoServer.Game.Auction.Transactions
                         var prior = AuctionPublicReceiptRepository.Find(c, t, intent);
                         if (prior != null) return true;
                         var messages = plan.CopySystemMails();
-                        if (!Active(c, t, intent.CharacterId, intent.AccountId)||!AdministrativeOwnersActive(c,t,intent)) return false;
+                        if (!Active(c, t, intent.CharacterId, intent.AccountId)) return false;
                         foreach (var mail in messages)
                             if (!Active(c, t, mail.SenderCharacterId, mail.SenderAccountId)
                                 || !Active(c, t, mail.ReceiverCharacterId, mail.ReceiverAccountId)) return false;
@@ -259,16 +237,6 @@ namespace DfoServer.Game.Auction.Transactions
             command.CommandText = "SELECT EXISTS(SELECT 1 FROM characters WHERE character_id=@cid AND account_id=@aid AND delete_flag=0);";
             command.Parameters.AddWithValue("@cid", cid); command.Parameters.AddWithValue("@aid", aid);
             return Convert.ToInt32(command.ExecuteScalar()) == 1;
-        }
-
-        private static bool AdministrativeOwnersActive(SqliteConnection c,SqliteTransaction t,AuctionOperationIntent intent)
-        {
-            if(intent.Action!=AuctionOperationAction.Admin)return true;
-            using var doc=JsonDocument.Parse(intent.IntentJson);
-            var transition=AuctionOrderTransition.DeserializeStrict(doc.RootElement.GetProperty("orderTransition").GetString());
-            bool Party(AuctionParty p)=>p==null||Active(c,t,p.CharacterId,p.AccountId);
-            return Party(transition.Before?.Seller)&&Party(transition.Before?.HighestBidder)
-                &&Party(transition.After.Seller)&&Party(transition.After.HighestBidder);
         }
 
         private static void RequireBoundPlan(AuctionOperationIntent intent, AuctionPublicAssetPlan plan)

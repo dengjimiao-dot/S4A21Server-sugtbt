@@ -79,7 +79,7 @@ namespace DfoServer.Game.Auction.Market
                             return new(AuctionMarketStatus.Rejected, "OperationRequestConflict", null, prior);
                         return ResumeEntry(prior); // Never execute old Prepared.
                     }
-                    if(entryPolicy!=null&&!entryPolicy(request))return new(AuctionMarketStatus.Unavailable,"AdministrativeEntryPolicy",null,null);
+                    if(entryPolicy!=null&&!entryPolicy(request))return new(AuctionMarketStatus.Unavailable,"EntryPolicy",null,null);
                     if (lease?.Inventory?.Database == null || request.Actor == null || lease.CharacterId != request.Actor.CharacterId
                         || lease.AccountId != request.Actor.AccountId || !InventoryContext.IsCurrentLease(lease, lease.SessionId, lease.CharacterId))
                         return new(AuctionMarketStatus.Unavailable, "CurrentOwnedLeaseRequired", null, null);
@@ -178,7 +178,7 @@ namespace DfoServer.Game.Auction.Market
         internal AuctionMarketPlanningResult Preview(AuctionMarketRequest request, InventoryLease lease)
         {
             lock(marketGate) {
-                if(entryPolicy!=null&&!entryPolicy(request))return new(AuctionMarketStatus.Unavailable,"AdministrativeEntryPolicy",null);
+                if(entryPolicy!=null&&!entryPolicy(request))return new(AuctionMarketStatus.Unavailable,"EntryPolicy",null);
                 if(lease==null||!InventoryContext.IsCurrentLease(lease,lease.SessionId,request.Actor.CharacterId))
                     return new(AuctionMarketStatus.Unavailable,"CurrentOwnedLeaseRequired",null);
                 lock(lease.SyncRoot) {

@@ -63,42 +63,5 @@ CREATE TABLE auction_order_delivery (
     public_message_id INTEGER NOT NULL CHECK(public_message_id>0),
     leg_json TEXT NOT NULL,
     PRIMARY KEY(operation_id,leg_key)
-);CREATE TABLE auction_admin_request (
-    request_id TEXT PRIMARY KEY,
-    payload_hash TEXT NOT NULL CHECK(length(payload_hash)=64),
-    command TEXT NOT NULL,
-    operator TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    target_account_id INTEGER,
-    target_character_id INTEGER,
-    operation_id TEXT UNIQUE,
-    status TEXT NOT NULL CHECK(status IN ('prepared','pending','committed','rejected','quarantined')),
-    request_json TEXT NOT NULL,
-    result_json TEXT,
-    before_json TEXT,
-    after_json TEXT,
-    created_at_unix INTEGER NOT NULL,
-    updated_at_unix INTEGER NOT NULL
-);
-CREATE INDEX idx_auction_admin_request_status ON auction_admin_request(status,created_at_unix);
-CREATE TABLE auction_admin_change (
-    request_id TEXT PRIMARY KEY REFERENCES auction_admin_request(request_id),
-    order_id INTEGER,
-    operation_id TEXT UNIQUE,
-    before_json TEXT,
-    after_json TEXT,
-    asset_plan_json TEXT NOT NULL,
-    adjustment_json TEXT NOT NULL,
-    public_receipt_json TEXT,
-    undone_by_request_id TEXT REFERENCES auction_admin_request(request_id),
-    created_at_unix INTEGER NOT NULL
-);
-CREATE INDEX idx_auction_admin_change_order ON auction_admin_change(order_id,created_at_unix);
-CREATE TABLE auction_admin_config (
-    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    version INTEGER NOT NULL,
-    config_json TEXT NOT NULL,
-    config_hash TEXT NOT NULL CHECK(length(config_hash)=64),
-    updated_at_unix INTEGER NOT NULL
 );";
 }

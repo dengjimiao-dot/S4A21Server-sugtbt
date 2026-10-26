@@ -42,7 +42,6 @@ namespace DfoServer.Game.SelectCharacter
         private readonly Quests.DailyChallengeService _dailyChallengeService;
         private readonly AntonAwakeningDailyProgressService
             _antonAwakeningProgress;
-        internal Tutorials.AccountTutorialFlagStore AccountTutorialFlags { get; }
 
         public SqliteSelectCharacterDataSource(
             string databasePath,
@@ -82,14 +81,12 @@ namespace DfoServer.Game.SelectCharacter
             InventoryCharacterLifecycleService inventoryLifecycle,
             IRentalTimeProvider rentalTimeProvider,
             DailyReset.DailyResetService dailyResetService,
-            AntonAwakeningDailyProgressService antonAwakeningProgress,
-            Tutorials.AccountTutorialFlagStore accountTutorialFlags = null)
+            AntonAwakeningDailyProgressService antonAwakeningProgress)
         {
             if (database == null)
                 throw new ArgumentNullException(nameof(database));
 
             _database = database;
-            AccountTutorialFlags = accountTutorialFlags;
             _connectionString = database.ConnectionString;
             var resolvedRentalTimeProvider = rentalTimeProvider ?? SystemRentalTimeProvider.Instance;
             _dailyResetService = dailyResetService ?? new DailyReset.DailyResetService(database);
@@ -285,8 +282,6 @@ namespace DfoServer.Game.SelectCharacter
             _dailyChallengeService.EnsureInitialized(characterId);
             _antonAwakeningProgress.EnsureCurrentDay(characterId);
             _initFlagsRepository.LoadAll(characterId, initSnapshot);
-            if (AccountTutorialFlags != null)
-                initSnapshot.AccountTutorialFlags.AddRange(AccountTutorialFlags.Load(accountId));
             ApplyOnlineItemStates(characterId, initSnapshot);
             var loginPermissions = _dungeonDifficultyPermissions
                 .BuildLoginPermissions(

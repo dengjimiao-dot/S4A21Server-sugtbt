@@ -143,7 +143,6 @@ namespace DfoServer.Infrastructure
             }
             _levelUpRewardRecovery = handler.StartLevelUpRewardRecovery(ClockService.Instance);
             _gameProtocolBuilt = true;
-            StartAdministration(core, world);
             return handler;
         }
 
@@ -183,9 +182,7 @@ namespace DfoServer.Infrastructure
                 inventoryLifecycle,
                 rentalTimeProvider,
                 dailyResetService,
-                antonProgress,
-                new Game.Tutorials.AccountTutorialFlagStore(
-                    Game.Tutorials.AccountTutorialDatabase.Open()));
+                antonProgress);
             var getUserInfoTemplate = new SqliteUserInfoBlobRepository(Database)
                 .LoadGetUserInfoTemplate();
             var eventManager = new EventManager(Database);
@@ -949,10 +946,7 @@ namespace DfoServer.Infrastructure
                     expertJobHandlers,
                     townDungeonHandlers,
                     socialHandlers,
-                    featureHandlers,
-                    (accountId, characterId) =>
-                        GetOrCreateAdminCharacterWriteFences().IsBlocked(
-                            accountId, characterId, out _));
+                    featureHandlers);
             return _characterSessionLifecycle;
         }
 
@@ -966,8 +960,7 @@ namespace DfoServer.Infrastructure
                 GameProtocolExpertJobHandlers expertJobHandlers,
                 GameProtocolTownDungeonHandlers townDungeonHandlers,
                 GameProtocolSocialHandlers socialHandlers,
-                GameProtocolFeatureHandlers featureHandlers,
-                Func<int, int, bool> adminCharacterWriteBlocked = null)
+                GameProtocolFeatureHandlers featureHandlers)
         {
             if (core == null) throw new ArgumentNullException(nameof(core));
             if (inventory == null) throw new ArgumentNullException(nameof(inventory));
@@ -1003,8 +996,7 @@ namespace DfoServer.Infrastructure
                 socialHandlers.PvpRoom,
                 inventory.InventoryRefreshSender,
                 core.Database,
-                core.DailyResetService,
-                adminCharacterWriteBlocked);
+                core.DailyResetService);
         }
 
         public void Dispose()
@@ -1013,7 +1005,6 @@ namespace DfoServer.Infrastructure
                 return;
 
             _disposed = true;
-            DisposeAdministration();
             _auctionRuntime?.Dispose();
             _levelUpRewardRecovery?.Dispose();
             _gameProtocolSocialHandlers?.Dispose();

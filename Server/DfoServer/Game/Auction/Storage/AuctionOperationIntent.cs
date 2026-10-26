@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace DfoServer.Game.Auction.Storage
 {
     // Domain actions are deliberately separate from wire opcode/selector values.
-    internal enum AuctionOperationAction { List = 1, Bid, Buyout, BuyPiece, Cancel, Expire, Admin }
+    internal enum AuctionOperationAction { List = 1, Bid, Buyout, BuyPiece, Cancel, Expire }
     internal enum AuctionOperationState { Prepared, Committed, Aborted, Quarantined }
 
     internal sealed record AuctionOperationIntent

@@ -1,7 +1,6 @@
 using System;
 using System.IO;
 using DfoServer.Game.Auction.Storage;
-using DfoServer.Game.Tutorials;
 using Microsoft.Data.Sqlite;
 
 namespace DfoServer.SelfTests;
@@ -24,14 +23,7 @@ public static class AuctionDatabaseSelfTest
             var intent = new AuctionOperationIntent(Guid.NewGuid(), "test:durable", AuctionOperationAction.List, 1, 1, 0, 1792700000, "{}");
             journal.Prepare(intent);
             Check("reopen preserves pending immutable operation", new AuctionOperationJournal(path).Find(intent.OperationId).Intent.IntentHash == intent.IntentHash);
-            Check("auction contains only its own seven tables and metadata", store.Read(c => { using var cmd = c.CreateCommand(); cmd.CommandText = "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"; return Convert.ToInt32(cmd.ExecuteScalar()) == 8; }));
-            string tutorials = Path.Combine(root, "tutorial.db");
-            var flags = new AccountTutorialFlagStore(AccountTutorialDatabase.Open(tutorials));
-            Check("new account starts unseen", flags.Load(1).Count == 0);
-            Check("normal close and Finish are idempotent", flags.Mark(1, 8) && !flags.Mark(1, 8));
-            Check("reopen remembers account choice", new AccountTutorialFlagStore(AccountTutorialDatabase.Open(tutorials)).Load(1)[0] == 8);
-            Check("other accounts remain unseen", flags.Load(2).Count == 0);
-            Check("tutorial and auction files cannot adopt each other", Refuses(() => AuctionDatabase.Open(tutorials)) && Refuses(() => AccountTutorialDatabase.Open(path)));
+            Check("auction contains only its own four tables and metadata", store.Read(c => { using var cmd = c.CreateCommand(); cmd.CommandText = "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';"; return Convert.ToInt32(cmd.ExecuteScalar()) == 5; }));
             string empty = Path.Combine(root, "unmarked.db"); File.WriteAllBytes(empty, Array.Empty<byte>());
             Check("preexisting unmarked file refused without adoption", Refuses(() => AuctionDatabase.Open(empty)) && new FileInfo(empty).Length == 0);
             store.Write((c, t) => { using var cmd = c.CreateCommand(); cmd.Transaction = t; cmd.CommandText = "CREATE TABLE unrecognized (value TEXT);"; cmd.ExecuteNonQuery(); });

@@ -116,26 +116,7 @@ namespace DfoServer.Network.Handlers.Dungeon
             var tutorialRunIdentity = tutorialRun?.CaptureIdentity() ?? default;
             uint flagIndex = request.FlagIndex;
             byte rewardFlag = request.RewardFlag;
-            if (request.Mode > 1)
-            {
-                FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] CHANGE_TUTORIAL_FLAG rejected mode={request.Mode}");
-                return;
-            }
             var activeCharacterId = session.Player.CharacterId;
-            // A21 auction tutorial factory uses account flag8. Its normal
-            // window-close and Finish paths both send mode1 (00ACBA40 ->
-            // 00ACB860). Persist this namespace independently from role30/31.
-            if (request.Mode == 1)
-            {
-                if (flagIndex >= Game.Tutorials.AccountTutorialFlagStore.FlagCount
-                    || session.Account == null || session.Account.AccountId <= 0 || activeCharacterId <= 0
-                    || _svc.AccountTutorialFlags == null)
-                {
-                    FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] CHANGE_TUTORIAL_FLAG rejected account context/index: mode={request.Mode} flagIndex={flagIndex}");
-                    return;
-                }
-                _svc.AccountTutorialFlags.Mark(session.Account.AccountId, (byte)flagIndex);
-            }
             var tutorialCharacterId = activeCharacterId > 0
                 ? activeCharacterId
                 : session.PendingReturnSelectCharacterId;
@@ -148,11 +129,11 @@ namespace DfoServer.Network.Handlers.Dungeon
                 tutorialSkipAlreadySaved = tutorialSnapshot.AckTutorialSkipable == 1;
             }
 
-            FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] CHANGE_TUTORIAL_FLAG: mode={request.Mode} flagIndex={flagIndex} rewardFlag={rewardFlag} dungeon={(session.Player.CurrentRun?.DungeonId ?? 0)} cid={activeCharacterId} pendingCid={session.PendingReturnSelectCharacterId}");
+            FileLogger.Log($"[{DungeonSharedServices.ProtocolLogName}] CHANGE_TUTORIAL_FLAG: flagIndex={flagIndex} rewardFlag={rewardFlag} dungeon={(session.Player.CurrentRun?.DungeonId ?? 0)} cid={activeCharacterId} pendingCid={session.PendingReturnSelectCharacterId}");
 
             // RewardTutorial: PVF serverparameter.etc [escalade tutorial reward]
             var inserted = new List<(short slot, int itemId, int count)>();
-            if (request.Mode == 0 && rewardFlag != 0 && !tutorialSkipAlreadySaved)
+            if (rewardFlag != 0 && !tutorialSkipAlreadySaved)
             {
                 if (flagIndex == 31 && activeCharacterId <= 0)
                 {

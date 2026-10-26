@@ -141,7 +141,7 @@ UNION ALL SELECT 1 FROM auction_operation WHERE character_id=@cid AND state IN (
                 var current = Find(c, t, transition.After.OrderId);
                 if (transition.Before == null)
                 {
-                    if (current != null || intent.Action is not (AuctionOperationAction.List or AuctionOperationAction.Admin) || intent.ExpectedVersion != 0)
+                    if (current != null || intent.Action != AuctionOperationAction.List || intent.ExpectedVersion != 0)
                         throw new InvalidOperationException("Auction listing identity already exists.");
                     using var quota = Command(c, t, @"SELECT count(*) FROM auction_order
 WHERE quota_key=@key AND (state IN (0,1) OR pending_operation_id IS NOT NULL);");
@@ -150,10 +150,9 @@ WHERE quota_key=@key AND (state IN (0,1) OR pending_operation_id IS NOT NULL);")
                         throw new InvalidOperationException("Auction listing quota exhausted.");
                 }
                 else if (current == null || current != transition.Before || current.PendingOperationId != null
-                    || (intent.Action != AuctionOperationAction.Admin && current.State != AuctionOrderState.Active) || current.Version != intent.ExpectedVersion)
+                    || current.State != AuctionOrderState.Active || current.Version != intent.ExpectedVersion)
                     throw new InvalidOperationException("Auction order CAS conflict.");
                 var entry = AuctionOperationJournal.PrepareInTransaction(c, t, intent);
-                BindAdministrativeRequest(c, t, intent, transition);
                 var reserved = transition.Before == null
                     ? transition.After with { Version = 0, State = AuctionOrderState.Funding,
                         FundedBidGold = 0, FundedDepositGold = 0, PendingOperationId = intent.OperationId }
@@ -211,7 +210,6 @@ VALUES(@op,@leg,@order,@cid,@mail,@json);");
                     Add(cmd, "@mail", messageIds[i]); Add(cmd, "@json", JsonSerializer.Serialize(leg)); cmd.ExecuteNonQuery();
                 }
                 AuctionOperationJournal.ResolveInTransaction(c, t, intent, AuctionOperationState.Committed, receipt.ResultJson, "");
-                CompleteAdministrativeRequest(c, t, intent, transition, receipt);
                 return transition.After;
             });
         }
@@ -244,7 +242,6 @@ VALUES(@op,@leg,@order,@cid,@mail,@json);");
                     }
                 }
                 AuctionOperationJournal.ResolveInTransaction(c, t, intent, target, "{}", reason);
-                ResolveAdministrativeRequest(c, t, intent, quarantine ? "quarantined" : "rejected", reason);
                 return true;
             });
         }
@@ -252,7 +249,6 @@ VALUES(@op,@leg,@order,@cid,@mail,@json);");
         private void ValidateFrozen(AuctionOperationIntent intent, AuctionOrderTransition x)
         {
             if (x == null || ReadTransition(intent).Serialize() != x.Serialize()) throw new ArgumentException("Transition differs from frozen intent.");
-            if (intent.Action == AuctionOperationAction.Admin) { ValidateAdministrative(intent, x); return; }
             var a = x.After; var b = x.Before; var q = x.Quote; var binding = q.Binding;
             ValidateSnapshot(a);
             if (b != null) ValidateSnapshot(b);

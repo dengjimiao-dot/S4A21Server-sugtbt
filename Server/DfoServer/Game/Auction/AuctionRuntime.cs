@@ -4,7 +4,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using DfoServer.Game.Auction.Assets;
-using DfoServer.Game.Auction.Admin;
 using DfoServer.Game.Auction.Market;
 using DfoServer.Game.Auction.Queries;
 using DfoServer.Game.Auction.Rules;
@@ -27,8 +26,6 @@ internal sealed class AuctionRuntime : IDisposable
     private readonly AuctionOrderRecovery recovery;
     private readonly AuctionOrderExpiryProcessor expiry;
     private readonly AuctionPublicAssetCommit rail;
-    private bool catalogReady;
-    private AuctionAdminSettings adminSettings = AuctionAdminSettings.Default with { EntryEnabled=false };
     private readonly Func<long> now;
     private ClockService.ClockTimerHandle timer;
     private bool disposed;
@@ -64,7 +61,7 @@ internal sealed class AuctionRuntime : IDisposable
                 AuctionNativeListingRuleResolver.Resolve),
             canRepresentListing: item => AuctionNativeDisplayProjection.TryProject(item, Codec, out _, out _),
             entryPolicy: request => request.Action==AuctionOperationAction.Expire
-                || (!RecoveryOnlyBuild&&EntryEnabled&&adminSettings.Allows(request)));
+                || (!RecoveryOnlyBuild&&EntryEnabled));
         recovery = new(Store, publicDatabase, rail, Gate);
         expiry = new(Store, Application, Gate);
         DeletionGuard = new(Store, publicDatabase, Gate);
@@ -92,49 +89,6 @@ internal sealed class AuctionRuntime : IDisposable
     internal AuctionQueryEngine Query => query.Value;
     internal AuctionTemplateCatalog Catalog => catalog.Value;
     internal long NowUnix => now();
-    internal AuctionAdminSettings AdminSettings => adminSettings;
-    internal MailboxSendRequest AdministrativeMail(AuctionDeliveryLeg leg, Guid operation) => CreateDeliveryMail(leg, operation);
-    internal AuctionOrderRecoveryResult RecoverAdministrativePending(int limit=1000)
-    { lock (Gate) return RecoverQuiescent(limit); }
-    internal IReadOnlyList<AuctionMarketResult> RunAdministrativeExpiry(int limit)
-    {
-        lock(Gate) { var results=expiry.RunDue(now(),limit); foreach(var result in results)PublishCommitted(result);return results; }
-    }
-    internal void ApplyAdministrativeSettings(AuctionAdminSettings settings)
-    {
-        lock(Gate) {
-            adminSettings=settings??throw new ArgumentNullException(nameof(settings));
-            if(settings.EntryEnabled&&!RecoveryOnlyBuild&&!catalogReady) {
-                try {_=catalog.Value;catalogReady=true;}
-                catch(Exception ex) when(ex is IOException||ex is InvalidDataException||ex is InvalidOperationException||ex is ArgumentException)
-                { FileLogger.Log("[Auction] Administrative entry unavailable: "+ex.GetType().Name); }
-            }
-            EntryEnabled=settings.EntryEnabled&&catalogReady&&!RecoveryOnlyBuild;
-        }
-    }
-    internal AuctionMarketResult ExecuteAdministrative(AuctionOperationIntent intent,AuctionOrderTransition transition,
-        AuctionPublicAssetPlan plan,DfoServer.Game.Inventory.InventoryLease lease,Action<AuctionAdminFaultPoint> fault=null)
-    {
-        lock(Gate) {
-            var prepared=Store.Prepare(intent,transition);
-            if(!prepared.Created)return Application.Resume(intent.OperationId);
-            var outcome=lease==null?rail.ExecuteFundedExpiry(intent,plan):rail.Execute(intent,plan,lease);
-            if(outcome.State==AuctionAssetCommitState.Committed) {
-                try { fault?.Invoke(AuctionAdminFaultPoint.AfterPublicReceiptBeforePrivateComplete);
-                    var after=Store.Complete(intent,outcome.Receipt);var entry=Store.FindOperation(intent.OperationId);
-                    rail.ReleaseTerminalAttempt(entry);var result=new AuctionMarketResult(AuctionMarketStatus.Committed,"",after,entry);PublishCommitted(result);return result;
-                } catch(Exception ex) when(ex is IOException||ex is InvalidOperationException||ex is Microsoft.Data.Sqlite.SqliteException) {
-                    return new(AuctionMarketStatus.Pending,"PublicCommittedPrivatePending",null,Store.FindOperation(intent.OperationId));
-                }
-            }
-            if(outcome.State==AuctionAssetCommitState.Rejected) {
-                Store.AbortVerifiedUncommitted(intent,outcome.Reason);var entry=Store.FindOperation(intent.OperationId);rail.ReleaseTerminalAttempt(entry);
-                return new(AuctionMarketStatus.Aborted,outcome.Reason,transition.Before,entry);
-            }
-            if(outcome.State==AuctionAssetCommitState.Conflict)Store.Quarantine(intent,outcome.Reason);
-            return new(outcome.State==AuctionAssetCommitState.Conflict?AuctionMarketStatus.Quarantined:AuctionMarketStatus.Pending,outcome.Reason,null,Store.FindOperation(intent.OperationId));
-        }
-    }
     internal event Action<IReadOnlyList<int>> DeliveriesCommitted;
 
     internal void PublishCommitted(AuctionMarketResult result)
@@ -249,14 +203,11 @@ internal sealed class AuctionRuntime : IDisposable
             SynchronizeHistory();
             if (requestedEntryEnabled)
             {
-                try { _ = catalog.Value; catalogReady=true; EntryEnabled = true; }
+                try { _ = catalog.Value; EntryEnabled = true; }
                 catch (Exception ex) when (ex is IOException || ex is InvalidDataException
                     || ex is InvalidOperationException || ex is ArgumentException)
                 { FileLogger.Log("[Auction] Entry unavailable: " + ex.GetType().Name); }
             }
-            var config=Store.ReadAdminConfig();
-            if(config.Version>0)ApplyAdministrativeSettings(AuctionAdminSettings.Read(config.Json));
-            else adminSettings=AuctionAdminSettings.Default with { EntryEnabled=EntryEnabled };
             Schedule(clock);
             return result;
         }

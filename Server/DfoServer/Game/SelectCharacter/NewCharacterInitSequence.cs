@@ -27,9 +27,6 @@ namespace DfoServer.Game.SelectCharacter
             // A21 进号主序列：USERINFO0 -> 基础状态 -> USERINFO1 -> 城镇状态
             // -> 0005 -> ITEM_LIST -> 0245 -> 0465/021E。
             Raw(0x01, 0x0004);
-            // 00ACEA60 restores the account set without an actor dependency.
-            // Publish before USERINFO/town creation can queue tutorial UI.
-            Raw(0x00, (ushort)NotiPacketTypeA21.ACCOUNT_TUTORIAL_INFO);
             Raw(0x00, (ushort)NotiPacketTypeA21.USERINFO, 0);
             // 有公会时，SelectCharacterPacketBuilder 在这条 USERINFO0 之后、USER_STATE 之前插入公会入口通知。
             Raw(0x00, 0x0166, 0);                   
@@ -93,6 +90,9 @@ namespace DfoServer.Game.SelectCharacter
             Raw(0x00, 0x01EB);                      
             Raw(0x00, 0x0061);                      
             Raw(0x00, 0x0158);                      
+            Raw(0x00, 0x02D5, 0);                   
+            Raw(0x00, 0x02D5, 1);                   
+            Raw(0x00, 0x02D5, 2);                   
             Raw(0x00, 0x01A8);                      
             Raw(0x00, 0x0009);
             Raw(0x00, 0x0344);
