@@ -86,6 +86,7 @@ namespace DfoServer
             ("--selftest-a21-item-hyperlink-chat", SelfTests.A21ItemHyperlinkChatSelfTest.Run),
             ("--selftest-a21-blacklist", SelfTests.A21BlacklistSelfTest.Run),
             ("--selftest-a21-guild-creation", SelfTests.A21GuildCreationSelfTest.Run),
+            ("--selftest-guild-dungeon", SelfTests.GuildDungeonSelfTest.Run),
             ("--selftest-pvf-map-monster-parsing", SelfTests.PvfMapMonsterParsingSelfTest.Run),
             ("--selftest-sequential-dungeon-definition", SelfTests.SequentialDungeonDefinitionCatalogSelfTest.Run),
             ("--selftest-sequential-dungeon-daily-loot", SelfTests.SequentialDungeonDailyLootSelfTest.Run),
