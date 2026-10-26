@@ -60,8 +60,9 @@ namespace DfoServer.Sqlite
                 new MigrationStep(35, "add_item_purchase_limit_day_id", ApplyItemPurchaseLimitDayId),
                 new MigrationStep(36, "add_seria_luck_ui_event", ApplySeriaLuckUiEvent),
                 new MigrationStep(37, "add_guild_contribution_agit_and_cargo", ApplyGuildFacilities),
-                new MigrationStep(38, "add_guild_dungeon_progress", ApplyGuildDungeonProgress),
-                new MigrationStep(39, "add_guild_contents", ApplyGuildContents),
+                new MigrationStep(38, "add_character_equipment_growth", ApplyCharacterEquipmentGrowth),
+                new MigrationStep(39, "add_guild_dungeon_progress", ApplyGuildDungeonProgress),
+                new MigrationStep(40, "add_guild_contents", ApplyGuildContents),
             };
 
         internal static int CurrentVersion =>
@@ -211,8 +212,28 @@ CREATE INDEX IF NOT EXISTS idx_character_npc_favor_daily
             command.ExecuteNonQuery();
         }
 
-        private static void ApplyGuildFacilities(SqliteConnection connection, SqliteTransaction transaction)
+        // 龙跃武器每件实例的成长值。跨列表移动时 item_uid 会变，
+        // 成长值迁移在 InventoryPersistenceService 的同一事务内完成。
+        private static void ApplyCharacterEquipmentGrowth(
+            SqliteConnection connection,
+            SqliteTransaction transaction)
         {
+            ExecuteSql(connection, transaction, @"CREATE TABLE IF NOT EXISTS character_equipment_growth (
+    character_id INTEGER NOT NULL,
+    item_uid INTEGER NOT NULL,
+    item_id INTEGER NOT NULL,
+    growth_value INTEGER NOT NULL DEFAULT 0 CHECK(growth_value >= 0),
+    stage INTEGER NOT NULL DEFAULT 1 CHECK(stage >= 1),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (character_id, item_uid),
+    FOREIGN KEY (character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_character_equipment_growth_item
+    ON character_equipment_growth(character_id, item_id);
+");
+        }
+
+        private static void ApplyGuildFacilities(SqliteConnection connection, SqliteTransaction transaction)        {
             AddColumnIfMissing(connection, transaction, "guilds", "contribution", "INTEGER NOT NULL DEFAULT 0 CHECK(contribution >= 0)");
             AddColumnIfMissing(connection, transaction, "guilds", "agit_level", "INTEGER NOT NULL DEFAULT 0 CHECK(agit_level >= 0)");
             AddColumnIfMissing(connection, transaction, "guilds", "cargo_slot_count", "INTEGER NOT NULL DEFAULT 0 CHECK(cargo_slot_count >= 0)");
@@ -225,7 +246,7 @@ CREATE INDEX IF NOT EXISTS idx_character_npc_favor_daily
 );");
         }
 
-        // v38: 公会地下城周期进度与结算台账。表结构与 item_schema.sql 一一对应,
+        // v39: 公会地下城周期进度与结算台账。表结构与 item_schema.sql 一一对应,
         // 运行时只由本迁移创建。
         private static void ApplyGuildDungeonProgress(SqliteConnection connection, SqliteTransaction transaction)
         {
@@ -249,7 +270,7 @@ CREATE INDEX IF NOT EXISTS idx_character_npc_favor_daily
 );");
         }
 
-        // v39: 公会购买内容(属性/经验加成)与绝对到期时间。
+        // v40: 公会购买内容(属性/经验加成)与绝对到期时间。
         private static void ApplyGuildContents(SqliteConnection connection, SqliteTransaction transaction)
         {
             ExecuteSql(connection, transaction, @"CREATE TABLE IF NOT EXISTS guild_contents (
