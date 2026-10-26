@@ -1628,3 +1628,17 @@ WHEN NEW.delete_flag <> 0 AND EXISTS (
 BEGIN
     SELECT RAISE(ABORT, 'leave guild before deleting character');
 END;
+
+-- 角色改名历史。changed_at 为 Unix 秒；old_name 保留 180 天用于防止旧名被抢注，
+-- 同角色两次改名间隔 90 天。写入与改名事务同批提交（CharacterRenameCommitService）。
+CREATE TABLE IF NOT EXISTS character_rename_history (
+    character_id INTEGER NOT NULL,
+    changed_at INTEGER NOT NULL,
+    old_name BLOB NOT NULL,
+    new_name BLOB NOT NULL,
+    source_item INTEGER NOT NULL,
+    PRIMARY KEY(character_id, changed_at),
+    FOREIGN KEY(character_id) REFERENCES characters(character_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_character_rename_old_name
+    ON character_rename_history(old_name, changed_at);

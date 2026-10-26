@@ -61,6 +61,7 @@ namespace DfoServer.Sqlite
                 new MigrationStep(36, "add_seria_luck_ui_event", ApplySeriaLuckUiEvent),
                 new MigrationStep(37, "add_guild_contribution_agit_and_cargo", ApplyGuildFacilities),
                 new MigrationStep(38, "add_character_equipment_growth", ApplyCharacterEquipmentGrowth),
+                new MigrationStep(39, "add_character_rename_history", CharacterRenameSchema.Apply),
             };
 
         internal static int CurrentVersion =>

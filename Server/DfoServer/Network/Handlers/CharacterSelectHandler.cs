@@ -970,7 +970,8 @@ namespace DfoServer.Network.Handlers
             }
 
             var existing = _characterRepository.GetByName(name);
-            if (existing != null)
+            if (existing != null || new CharacterRenameRepository(_database)
+                .IsNameReserved(nameRaw, DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
             {
                 // 20/24 公告 已存在的角色名
                 // 159 公告 包含无法使用的文字
@@ -1030,7 +1031,8 @@ namespace DfoServer.Network.Handlers
                 return;
             }
 
-            if (_characterRepository.GetByName(nameStr) != null)
+            if (_characterRepository.GetByName(nameStr) != null || new CharacterRenameRepository(_database)
+                .IsNameReserved(nameRaw, DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
             {
                 // 与 CHECK_DOUBLE_CHARACTER_NAME 一致：24 = 已存在的角色名
                 await session.SendPacketAsync(GamePacketEnvelopeBuilder.Build(
