@@ -15,6 +15,9 @@ namespace DfoServer.SelfTests
         private static int _failures;
         private static int _checks;
         private const int WeaponId = 31044;
+        private const string LegacyType = "[expert town potion] 0";
+        private const string UsualType = "[item upgrad buff usual upgrade]";
+        private const string AmplifyType = "[item upgrad buff amplify upgrade]";
 
         public static int Run()
         {
@@ -34,46 +37,124 @@ namespace DfoServer.SelfTests
         {
             foreach (var entry in new[]
             {
-                (2600025, ItemUpgradeMode.Reinforce, 1000),
-                (2749959, ItemUpgradeMode.Reinforce, 1000),
-                (10007343, ItemUpgradeMode.Reinforce, 10000),
-                (490001533, ItemUpgradeMode.Reinforce, 1000),
-                (490001534, ItemUpgradeMode.Amplify, 1000),
-                (10004688, ItemUpgradeMode.Amplify, 5000),
-                (10004745, ItemUpgradeMode.Amplify, 3000),
+                (2600025, ItemUpgradeMode.Reinforce, 1000, false),
+                (2749959, ItemUpgradeMode.Reinforce, 1000, false),
+                (10007343, ItemUpgradeMode.Reinforce, 10000, true),
+                (490001533, ItemUpgradeMode.Reinforce, 1000, false),
+                (490001534, ItemUpgradeMode.Amplify, 1000, false),
+                (10004687, ItemUpgradeMode.Reinforce, 3000, false),
+                (10004744, ItemUpgradeMode.Reinforce, 3000, false),
+                (10006268, ItemUpgradeMode.Reinforce, 1000, false),
+                (10004688, ItemUpgradeMode.Amplify, 5000, false),
+                (10004745, ItemUpgradeMode.Amplify, 3000, false),
             })
             {
                 var definition = StackableItemProvider.Load(entry.Item1);
-                Check(ItemUpgradePotionBonus.TryGetBonus(entry.Item1, definition, entry.Item2, out var weight, out _)
-                    && weight == entry.Item3, $"PVF bonus {entry.Item1}");
+                Check(ItemUpgradePotionBonus.TryGetBonus(definition, entry.Item2, out var weight, out var crystal)
+                    && weight == entry.Item3 && crystal == entry.Item4, $"PVF bonus {entry.Item1}");
                 var otherMode = entry.Item2 == ItemUpgradeMode.Reinforce ? ItemUpgradeMode.Amplify : ItemUpgradeMode.Reinforce;
-                Check(!ItemUpgradePotionBonus.TryGetBonus(entry.Item1, definition, otherMode, out _, out _),
+                Check(!ItemUpgradePotionBonus.TryGetBonus(definition, otherMode, out _, out _),
                     $"mode isolation {entry.Item1}");
             }
 
-            foreach (var amount in new[] { "", "-1", "100001", "2147483648", "1.5", "1000 1000", "abc" })
-            {
-                var definition = StackableItemFile.Parse("[stackable type]\n`[item upgrad buff usual upgrade]` "
-                    + amount + "\n[effect maintenance]\n1 1 1 0\n[stat change duration]\n1800000 `myself`\n");
-                Check(!ItemUpgradePotionBonus.TryGetBonus(99999, definition, ItemUpgradeMode.Reinforce, out _, out _),
-                    "invalid bonus rejected: " + amount);
-            }
-            Check(!ItemUpgradePotionBonus.TryGetBonus(2600025, null, ItemUpgradeMode.Reinforce, out _, out _), "null definition");
-            Check(!ItemUpgradePotionBonus.TryGetBonus(99999, StackableItemProvider.Load(2600025),
-                ItemUpgradeMode.Reinforce, out _, out _), "unrelated town potion not inferred from name/type");
+            // 赛丽亚的幸运强化药剂: random event buff text is not a fixed probability.
+            var randomBuff = StackableItemProvider.Load(10008220);
+            Check(randomBuff != null
+                && !ItemUpgradePotionBonus.TryGetBonus(randomBuff, ItemUpgradeMode.Reinforce, out _, out _),
+                "random event buff potion excluded 10008220");
 
+            // Typed definitions read the trailing integer, independent of item id.
+            CheckSyntheticBonus(UsualType + " 3000", "使用后， 可增加强化成功几率， 持续3分钟。",
+                ItemUpgradeMode.Reinforce, 3000, false, "typed usual 3000");
+            CheckSyntheticBonus(AmplifyType + " 5000", "使用后， 可增加增幅成功几率， 持续3分钟。",
+                ItemUpgradeMode.Amplify, 5000, false, "typed amplify 5000");
+            CheckSyntheticBonus(UsualType + " 3000", "使用后， 可增加增幅成功几率， 持续3分钟。",
+                ItemUpgradeMode.Amplify, 0, false, "typed usual excluded from amplify", expectedMatch: false);
+
+            foreach (var amount in new[] { "", "0", "-1", "100001", "2147483648", "1.5", "1000 1000", "abc" })
+                CheckSyntheticBonus(UsualType + " " + amount, "使用后， 可增加强化成功几率， 持续3分钟。",
+                    ItemUpgradeMode.Reinforce, 0, false, "invalid typed bonus rejected: " + amount, expectedMatch: false);
+
+            // Legacy `[expert town potion]`: no numeric field in PVF.
+            CheckSyntheticBonus(LegacyType, "使用后， 可以提升强化成功率， 效果持续30分钟。",
+                ItemUpgradeMode.Reinforce, 1000, false, "legacy default 1 percentage point");
+            CheckSyntheticBonus(LegacyType, "使用后， 强化成功率增加10%%， 效果持续30秒。",
+                ItemUpgradeMode.Reinforce, 10000, true, "legacy explicit 10%%");
+            CheckSyntheticBonus(LegacyType, "使用后， 强化成功率增加10%， 效果持续30秒。",
+                ItemUpgradeMode.Reinforce, 10000, true, "legacy explicit 10%");
+            CheckSyntheticBonus(LegacyType, "使用后， 强化成功率增加 5 %% ， 效果持续30分钟。",
+                ItemUpgradeMode.Reinforce, 5000, true, "legacy explicit spaced percentage");
+            CheckSyntheticBonus(LegacyType, "使用后， 强化成功率增加1%%。",
+                ItemUpgradeMode.Reinforce, 1000, true, "legacy explicit lower bound 1%%");
+            CheckSyntheticBonus(LegacyType, "使用后， 强化成功率增加100%%。",
+                ItemUpgradeMode.Reinforce, 100000, true, "legacy explicit upper bound 100%%");
+            CheckSyntheticBonus(LegacyType, "使用后， 强化成功率增加10%%。",
+                ItemUpgradeMode.Amplify, 0, false, "legacy potion excluded from amplify", expectedMatch: false);
+
+            foreach (var explain in new[]
+            {
+                "使用后， 强化成功率增加0%%。",
+                "使用后， 强化成功率增加101%%。",
+                "使用后， 强化成功率增加-10%%。",
+                "使用后， 强化成功率增加10.5%%。",
+                "使用后， 强化成功率增加10%%， 并额外增加20%%。",
+                "使用后， 强化成功率增加10%%， 冷却时间60%。",
+                "使用后， 强化成功率增加十%%。",
+                "使用后， 强化成功率增加%%。",
+                "使用后， 强化成功率增加， 效果持续30分钟。",
+                "使用后， 提高强化成功率10%%。",
+                "使用后， 获得强化成功率提升Buff， 效果持续10分钟。",
+                "使用后， 可以提升强化成功率， 但强化成功率增加的效果随机。",
+                "使用后， 恢复30点疲劳值。",
+                "效果持续30分钟。",
+                "",
+            })
+                CheckSyntheticBonus(LegacyType, explain, ItemUpgradeMode.Reinforce, 0, false,
+                    "legacy rejected: " + explain, expectedMatch: false);
+
+            Check(!ItemUpgradePotionBonus.TryGetBonus(null, ItemUpgradeMode.Reinforce, out _, out _), "null definition");
+            CheckSyntheticBonus(LegacyType, "使用后， 可以提升强化成功率， 效果持续30分钟。",
+                ItemUpgradeMode.Reinforce, 0, false, "legacy without effect maintenance",
+                expectedMatch: false, effectMaintenance: false);
+            CheckSyntheticBonus(LegacyType, "使用后， 可以提升强化成功率， 效果持续30分钟。",
+                ItemUpgradeMode.Reinforce, 0, false, "legacy without duration",
+                expectedMatch: false, duration: -1);
+            Check(ItemUpgradePotionBonus.TryGetBonus(StackableItemProvider.Load(2600025),
+                ItemUpgradeMode.Reinforce, out var legacyWeight, out _) && legacyWeight == 1000,
+                "legacy definition resolves");
+        }
+
+        private static void CheckSyntheticBonus(
+            string stackableType,
+            string explain,
+            ItemUpgradeMode mode,
+            int expectedWeight,
+            bool expectedCrystal,
+            string name,
+            bool expectedMatch = true,
+            bool effectMaintenance = true,
+            int duration = 1800000)
+        {
+            var content = "[stackable type]\n`" + stackableType + "`\n[explain]\n`" + explain + "`\n"
+                + (effectMaintenance ? "[effect maintenance]\n1 1 1 0\n" : "")
+                + (duration >= 0 ? "[stat change duration]\n" + duration + " `myself`\n" : "");
+            var definition = StackableItemFile.Parse(content);
+            var matched = ItemUpgradePotionBonus.TryGetBonus(definition, mode, out var weight, out var crystal);
+            Check(expectedMatch
+                ? matched && weight == expectedWeight && crystal == expectedCrystal
+                : !matched, name, quiet: true);
         }
 
         private static void VerifyStateBoundaries()
         {
             const int now = 1800000000;
-            foreach (var id in new[] { 2600025, 2749959, 10007343, 490001533, 490001534 })
+            foreach (var id in new[] { 2600025, 2749959, 10007343, 490001533, 490001534, 10004687 })
             {
                 var inventory = new InventoryService(99101, 99102);
                 var definition = StackableItemProvider.Load(id);
                 var mode = id == 490001534 ? ItemUpgradeMode.Amplify : ItemUpgradeMode.Reinforce;
                 var duration = definition.StatChangeDurationMilliseconds / 1000;
-                var expected = id == 10007343 ? 10000 : 1000;
+                var expected = id == 10007343 ? 10000 : id == 10004687 ? 3000 : 1000;
                 inventory.SetItem(InventoryListType.Main, 30, Stack(id, 3));
                 Check(Bonus(inventory, mode, now) == 0, "inventory alone has no bonus " + id);
                 inventory.ItemStates.Upsert(ItemStateKinds.Cooltime, id, now + duration);
@@ -101,9 +182,13 @@ namespace DfoServer.SelfTests
             }
 
             var combined = new InventoryService(99105, 99106);
-            foreach (var id in new[] { 2600025, 2749959, 490001533, 10007343, 490001534, 10004688, 10004745 })
+            foreach (var id in new[]
+            {
+                2600025, 2749959, 490001533, 10007343, 490001534,
+                10004687, 10004744, 10006268, 10004688, 10004745,
+            })
                 combined.ItemStates.Upsert(ItemStateKinds.Effect, id, now + 300);
-            Check(Bonus(combined, ItemUpgradeMode.Reinforce, now) == 11000, "same-family reinforce max plus crystal");
+            Check(Bonus(combined, ItemUpgradeMode.Reinforce, now) == 13000, "same-family reinforce max plus crystal");
             Check(Bonus(combined, ItemUpgradeMode.Amplify, now) == 5000, "amplify takes strongest active definition");
             combined.ItemStates.Upsert(ItemStateKinds.Effect, 10004688, now);
             Check(Bonus(combined, ItemUpgradeMode.Amplify, now) == 3000, "expired strongest falls back to active weaker potion");
