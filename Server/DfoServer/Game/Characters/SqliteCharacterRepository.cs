@@ -11,6 +11,21 @@ namespace DfoServer.Game.Characters
     public sealed class SqliteCharacterRepository : ICharacterRepository
     {
         private readonly IGameDatabase _database;
+        private Func<int, Action, bool> _deletionGuard;
+
+        internal void ConfigureDeletionGuard(Func<int, Action, bool> guard)
+        {
+            ArgumentNullException.ThrowIfNull(guard);
+            if (_deletionGuard != null) throw new InvalidOperationException("Character deletion guard already configured.");
+            _deletionGuard = guard;
+        }
+
+        private void ExecuteDeletion(int characterId, Action mutation)
+        {
+            if (_deletionGuard == null) mutation();
+            else if (!_deletionGuard(characterId, mutation))
+                throw new InvalidOperationException("Character has unresolved auction assets.");
+        }
 
         public SqliteCharacterRepository(string databasePath, string schemaFilePath)
             : this(new GameDatabase(databasePath, schemaFilePath))
@@ -67,9 +82,22 @@ namespace DfoServer.Game.Characters
             using (var conn = Open())
             using (var cmd = conn.CreateCommand())
             {
+                using var transaction = conn.BeginTransaction(deferred: false);
+                cmd.Transaction = transaction;
+                // 与并发改名串行：等锁期间对方可能刚提交旧名保留，插入前重新校验一次。
+                using (var nameCheck = conn.CreateCommand())
+                {
+                    nameCheck.Transaction = transaction;
+                    nameCheck.CommandText = "SELECT character_id FROM characters WHERE name=@name LIMIT 1;";
+                    nameCheck.Parameters.AddWithValue("@name", record.Name);
+                    if (nameCheck.ExecuteScalar() != null || Names.CharacterRenameRepository.Reserved(conn, transaction,
+                        record.Name, DateTimeOffset.UtcNow.ToUnixTimeSeconds()))
+                        throw new InvalidOperationException("Character name already exists or is reserved.");
+                }
                 // 自动分配 slot_index：取该 account 下未删除角色中最大 slot_index + 1
                 using (var maxCmd = conn.CreateCommand())
                 {
+                    maxCmd.Transaction = transaction;
                     maxCmd.CommandText = "SELECT COALESCE(MAX(slot_index), -1) FROM characters WHERE account_id = @accid AND delete_flag = 0;";
                     maxCmd.Parameters.AddWithValue("@accid", record.AccountId);
                     var maxSlot = Convert.ToInt32(maxCmd.ExecuteScalar());
@@ -104,7 +132,9 @@ SELECT character_id FROM characters WHERE rowid = last_insert_rowid();";
                 cmd.Parameters.AddWithValue("@blob", (object)CharacterAppearanceCodec.Encode(record.Appearance) ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("@slot", (int)record.SlotIndex);
 
-                return Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+                var id = Convert.ToInt32(cmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+                transaction.Commit();
+                return id;
             }
         }
 
@@ -244,6 +274,9 @@ WHERE character_id = @id;";
         }
 
         public void SoftDelete(int characterId)
+            => ExecuteDeletion(characterId, () => SoftDeleteCore(characterId));
+
+        private void SoftDeleteCore(int characterId)
         {
             using (var conn = Open())
             using (var cmd = conn.CreateCommand())
@@ -256,6 +289,9 @@ WHERE character_id = @id;";
         }
 
         public void SoftDeleteAndCompactSlots(int accountId, int characterId, byte slotIndex)
+            => ExecuteDeletion(characterId, () => SoftDeleteAndCompactSlotsCore(accountId, characterId, slotIndex));
+
+        private void SoftDeleteAndCompactSlotsCore(int accountId, int characterId, byte slotIndex)
         {
             using (var conn = Open())
             using (var tx = conn.BeginTransaction())
